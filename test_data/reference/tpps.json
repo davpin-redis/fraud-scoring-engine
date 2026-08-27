@@ -1,0 +1,22 @@
+[
+  {
+    "tpp_name_ud": "tpp_Alpha",
+    "typical_country": "GB"
+  },
+  {
+    "tpp_name_ud": "tpp_Beta",
+    "typical_country": "BR"
+  },
+  {
+    "tpp_name_ud": "tpp_Gamma",
+    "typical_country": "SG"
+  },
+  {
+    "tpp_name_ud": "tpp_Delta",
+    "typical_country": "US"
+  },
+  {
+    "tpp_name_ud": "tpp_Epsilon",
+    "typical_country": "GB"
+  }
+]

@@ -1,0 +1,155 @@
+[
+  {
+    "rule_id": "R001_blacklisted_beneficiary",
+    "type": "hard_block",
+    "condition": "receiver_transaction_bank_account_number in bl_accounts"
+  },
+  {
+    "rule_id": "R002_blacklisted_device",
+    "type": "hard_block",
+    "condition": "device_fingerprint in bl_devices"
+  },
+  {
+    "rule_id": "R003_vip_low_amount_fast_track",
+    "type": "hard_allow",
+    "condition": "customer_id in vip_customers and amount_base < 500"
+  },
+  {
+    "rule_id": "R004_velocity_burst",
+    "type": "soft",
+    "condition": "customer_txn_count_1h > 5",
+    "weight": 0.4
+  },
+  {
+    "rule_id": "R005_mule_fan_in",
+    "type": "soft",
+    "condition": "bene_distinct_senders_24h > 10",
+    "weight": 0.5
+  },
+  {
+    "rule_id": "R006_new_payee_high_amount",
+    "type": "soft",
+    "condition": "pair_txn_count_90d == 0 and amount_base > 1000",
+    "weight": 0.35
+  },
+  {
+    "rule_id": "R007_cross_border_off_hours",
+    "type": "soft",
+    "condition": "customer_portfolio_country != beneficiary_country and local_hour in [0,1,2,3,4]",
+    "weight": 0.3
+  },
+  {
+    "rule_id": "R008_watchlist_customer",
+    "type": "soft",
+    "condition": "customer_id in watchlist",
+    "weight": 0.3
+  },
+  {
+    "rule_id": "R009_device_sharing",
+    "type": "soft",
+    "condition": "device_distinct_customers > 2",
+    "weight": 0.3
+  },
+  {
+    "rule_id": "R010_ip_geo_anomaly",
+    "type": "soft",
+    "condition": "ip_country != customer_portfolio_country or ip_proxy",
+    "weight": 0.3
+  },
+  {
+    "rule_id": "R011_new_account_high_amount",
+    "type": "soft",
+    "condition": "account_age_days < 30 and amount_base > 1000",
+    "weight": 0.3
+  },
+  {
+    "rule_id": "R012_repeat_declines_90d",
+    "type": "soft",
+    "condition": "customer_declines_90d >= 3",
+    "weight": 0.4
+  },
+  {
+    "rule_id": "R013_beneficiary_fanout_90d",
+    "type": "soft",
+    "condition": "customer_distinct_bene_90d > 15",
+    "weight": 0.35
+  },
+  {
+    "rule_id": "R014_repeat_declines_24h",
+    "type": "soft",
+    "condition": "customer_declines_24h >= 3",
+    "weight": 0.45
+  },
+  {
+    "rule_id": "R015_beneficiary_fanout_24h",
+    "type": "soft",
+    "condition": "customer_distinct_bene_24h > 8",
+    "weight": 0.35
+  },
+  {
+    "rule_id": "R016_mule_fan_in_90d",
+    "type": "soft",
+    "condition": "bene_distinct_senders_90d > 30",
+    "weight": 0.4
+  },
+  {
+    "rule_id": "R017_velocity_burst_5m",
+    "type": "soft",
+    "condition": "customer_txn_rate_5m > 5",
+    "weight": 0.4
+  },
+  {
+    "rule_id": "R018_amount_anomaly_90d",
+    "type": "soft",
+    "condition": "amount_zscore_90d > 3",
+    "weight": 0.4
+  },
+  {
+    "rule_id": "R019_velocity_spike_vs_baseline",
+    "type": "soft",
+    "condition": "velocity_ratio_1h > 8",
+    "weight": 0.45
+  },
+  {
+    "rule_id": "R020_sustained_elevation",
+    "type": "soft",
+    "condition": "velocity_elevated_hours >= 4",
+    "weight": 0.4
+  },
+  {
+    "rule_id": "R021_offhour_activity",
+    "type": "soft",
+    "condition": "hod_share_now < 0.01",
+    "weight": 0.3
+  },
+  {
+    "rule_id": "R022_machine_cadence",
+    "type": "soft",
+    "condition": "interarrival_cv < 0.15",
+    "weight": 0.4
+  },
+  {
+    "rule_id": "R023_amount_bustout",
+    "type": "soft",
+    "condition": "amount_trend > 0.15",
+    "weight": 0.45
+  },
+  {
+    "rule_id": "R024_dormant_reactivation",
+    "type": "soft",
+    "condition": "dormancy_days > 60",
+    "weight": 0.35
+  },
+  {
+    "rule_id": "R025_device_surge",
+    "type": "soft",
+    "condition": "device_surge > 5",
+    "weight": 0.4
+  },
+  {
+    "rule_id": "R026_bene_inbound_surge",
+    "type": "soft",
+    "condition": "bene_surge > 5",
+    "weight": 0.4
+  }
+]

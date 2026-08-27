@@ -1,0 +1,211 @@
+[
+  {
+    "label": "baseline_clean_txn",
+    "expected_decision": "approve",
+    "expected_trigger": null,
+    "note": "Ordinary transaction, no rule should fire.",
+    "request": {
+      "transaction_id": "req_001",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_005",
+      "customer_portfolio_country": "US",
+      "receiver_transaction_bank_account_number": "bene_003",
+      "tpp_name_ud": "tpp_Alpha",
+      "device_fingerprint": "device_005",
+      "ip_address": "51.1.0.5",
+      "amount": 65.0,
+      "currency": "GBP",
+      "amount_base": 65.0
+    }
+  },
+  {
+    "label": "vip_fast_track",
+    "expected_decision": "approve",
+    "expected_trigger": "R003_vip_low_amount_fast_track",
+    "note": "VIP customer, small amount \u2014 hard-allow rule.",
+    "request": {
+      "transaction_id": "req_002",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_046",
+      "customer_portfolio_country": "GB",
+      "receiver_transaction_bank_account_number": "bene_002",
+      "tpp_name_ud": "tpp_Beta",
+      "device_fingerprint": "device_046",
+      "ip_address": "51.2.0.46",
+      "amount": 40.0,
+      "currency": "GBP",
+      "amount_base": 40.0
+    }
+  },
+  {
+    "label": "blacklisted_beneficiary",
+    "expected_decision": "decline",
+    "expected_trigger": "R001_blacklisted_beneficiary",
+    "note": "Beneficiary bene_020 is on the blacklist \u2014 hard block.",
+    "request": {
+      "transaction_id": "req_003",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_038",
+      "customer_portfolio_country": "SG",
+      "receiver_transaction_bank_account_number": "bene_020",
+      "tpp_name_ud": "tpp_Gamma",
+      "device_fingerprint": "device_038",
+      "ip_address": "51.4.0.38",
+      "amount": 250.0,
+      "currency": "GBP",
+      "amount_base": 250.0
+    }
+  },
+  {
+    "label": "blacklisted_device",
+    "expected_decision": "decline",
+    "expected_trigger": "R002_blacklisted_device",
+    "note": "device_099 is on the blacklist \u2014 hard block.",
+    "request": {
+      "transaction_id": "req_004",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_035",
+      "customer_portfolio_country": "US",
+      "receiver_transaction_bank_account_number": "bene_004",
+      "tpp_name_ud": "tpp_Delta",
+      "device_fingerprint": "device_099",
+      "ip_address": "51.1.0.35",
+      "amount": 90.0,
+      "currency": "GBP",
+      "amount_base": 90.0
+    }
+  },
+  {
+    "label": "velocity_burst_followup",
+    "expected_decision": "review",
+    "expected_trigger": "R004_velocity_burst",
+    "note": "cust_012 already made 9 txns in the last hour (see backfill) \u2014 one more should trip velocity.",
+    "request": {
+      "transaction_id": "req_005",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_012",
+      "customer_portfolio_country": "DE",
+      "receiver_transaction_bank_account_number": "bene_005",
+      "tpp_name_ud": "tpp_Alpha",
+      "device_fingerprint": "device_012",
+      "ip_address": "51.3.0.12",
+      "amount": 45.0,
+      "currency": "GBP",
+      "amount_base": 45.0
+    }
+  },
+  {
+    "label": "mule_fan_in_followup",
+    "expected_decision": "review",
+    "expected_trigger": "R005_mule_fan_in",
+    "note": "bene_018 already received from 14 distinct customers in 24h (see backfill).",
+    "request": {
+      "transaction_id": "req_006",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_020",
+      "customer_portfolio_country": "US",
+      "receiver_transaction_bank_account_number": "bene_018",
+      "tpp_name_ud": "tpp_Beta",
+      "device_fingerprint": "device_020",
+      "ip_address": "51.1.0.20",
+      "amount": 95.0,
+      "currency": "GBP",
+      "amount_base": 95.0
+    }
+  },
+  {
+    "label": "new_payee_high_amount",
+    "expected_decision": "review",
+    "expected_trigger": "R006_new_payee_high_amount",
+    "note": "cust_020 has no prior history paying bene_015, and amount is large.",
+    "request": {
+      "transaction_id": "req_007",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_020",
+      "customer_portfolio_country": "US",
+      "receiver_transaction_bank_account_number": "bene_015",
+      "tpp_name_ud": "tpp_Gamma",
+      "device_fingerprint": "device_020",
+      "ip_address": "51.1.0.20",
+      "amount": 4800.0,
+      "currency": "GBP",
+      "amount_base": 4800.0
+    }
+  },
+  {
+    "label": "established_payee_high_amount",
+    "expected_decision": "approve",
+    "expected_trigger": null,
+    "note": "cust_030 has 90 days of history paying bene_017 (see backfill) \u2014 large amount alone shouldn't trip R006.",
+    "request": {
+      "transaction_id": "req_008",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_030",
+      "customer_portfolio_country": "DE",
+      "receiver_transaction_bank_account_number": "bene_017",
+      "tpp_name_ud": "tpp_Delta",
+      "device_fingerprint": "device_030",
+      "ip_address": "51.3.0.30",
+      "amount": 4800.0,
+      "currency": "GBP",
+      "amount_base": 4800.0
+    }
+  },
+  {
+    "label": "cross_border_off_hours",
+    "expected_decision": "review",
+    "expected_trigger": "R007_cross_border_off_hours",
+    "note": "cust_030 is US, bene_017 assumed non-US; timestamp set to 03:14 local/UTC.",
+    "request": {
+      "transaction_id": "req_009",
+      "timestamp": "2026-08-10T03:14:00+00:00",
+      "customer_id": "cust_030",
+      "customer_portfolio_country": "DE",
+      "receiver_transaction_bank_account_number": "bene_017",
+      "tpp_name_ud": "tpp_Epsilon",
+      "device_fingerprint": "device_030",
+      "ip_address": "51.3.0.30",
+      "amount": 2200.0,
+      "currency": "GBP",
+      "amount_base": 2200.0
+    }
+  },
+  {
+    "label": "watchlist_customer",
+    "expected_decision": "review",
+    "expected_trigger": "R008_watchlist_customer",
+    "note": "cust_049 is on the watchlist membership list.",
+    "request": {
+      "transaction_id": "req_010",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_049",
+      "customer_portfolio_country": "BR",
+      "receiver_transaction_bank_account_number": "bene_006",
+      "tpp_name_ud": "tpp_Alpha",
+      "device_fingerprint": "device_049",
+      "ip_address": "51.5.0.49",
+      "amount": 150.0,
+      "currency": "GBP",
+      "amount_base": 150.0
+    }
+  },
+  {
+    "label": "baseline_clean_txn_2",
+    "expected_decision": "approve",
+    "expected_trigger": null,
+    "note": "Second ordinary control-group transaction.",
+    "request": {
+      "transaction_id": "req_011",
+      "timestamp": "2026-08-10T12:00:00+00:00",
+      "customer_id": "cust_022",
+      "customer_portfolio_country": "GB",
+      "receiver_transaction_bank_account_number": "bene_009",
+      "tpp_name_ud": "tpp_Beta",
+      "device_fingerprint": "device_022",
+      "ip_address": "51.2.0.22",
+      "amount": 120.0,
+      "currency": "GBP",
+      "amount_base": 120.0
+    }
+  }
+]

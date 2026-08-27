@@ -1,0 +1,602 @@
+[
+  {
+    "customer_id": "cust_001",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2025-06-08",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_001",
+    "ip_address": "51.1.0.1",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_002",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2024-07-08",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_002",
+    "ip_address": "51.1.0.2",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_003",
+    "customer_portfolio_country": "DE",
+    "account_open_date": "2025-04-12",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_003",
+    "ip_address": "51.3.0.3",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_004",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2023-01-02",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_004",
+    "ip_address": "51.1.0.4",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_005",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2023-09-11",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_005",
+    "ip_address": "51.1.0.5",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_006",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2025-07-15",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_006",
+    "ip_address": "51.1.0.6",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_007",
+    "customer_portfolio_country": "DE",
+    "account_open_date": "2023-03-25",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_007",
+    "ip_address": "51.3.0.7",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_008",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2022-11-30",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_008",
+    "ip_address": "51.1.0.8",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_009",
+    "customer_portfolio_country": "GB",
+    "account_open_date": "2023-01-02",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_009",
+    "ip_address": "51.2.0.9",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_010",
+    "customer_portfolio_country": "GB",
+    "account_open_date": "2023-07-18",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_shared_01",
+    "ip_address": "51.2.0.10",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_011",
+    "customer_portfolio_country": "SG",
+    "account_open_date": "2026-01-09",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_011",
+    "ip_address": "51.4.0.11",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_012",
+    "customer_portfolio_country": "DE",
+    "account_open_date": "2025-03-02",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_012",
+    "ip_address": "51.3.0.12",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_013",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2024-02-26",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_013",
+    "ip_address": "51.1.0.13",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_014",
+    "customer_portfolio_country": "BR",
+    "account_open_date": "2024-11-08",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_014",
+    "ip_address": "51.5.0.14",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_015",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2024-03-04",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_015",
+    "ip_address": "51.1.0.15",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_016",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2023-12-06",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_016",
+    "ip_address": "51.1.0.16",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_017",
+    "customer_portfolio_country": "DE",
+    "account_open_date": "2024-02-18",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_017",
+    "ip_address": "51.3.0.17",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_018",
+    "customer_portfolio_country": "DE",
+    "account_open_date": "2025-10-26",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_018",
+    "ip_address": "51.3.0.18",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_019",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2023-01-20",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_019",
+    "ip_address": "51.1.0.19",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_020",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2023-12-09",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_020",
+    "ip_address": "51.1.0.20",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_021",
+    "customer_portfolio_country": "SG",
+    "account_open_date": "2024-06-01",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_021",
+    "ip_address": "51.4.0.21",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_022",
+    "customer_portfolio_country": "GB",
+    "account_open_date": "2024-01-13",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_022",
+    "ip_address": "51.2.0.22",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_023",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2025-09-02",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_023",
+    "ip_address": "51.1.0.23",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_024",
+    "customer_portfolio_country": "SG",
+    "account_open_date": "2024-10-13",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_024",
+    "ip_address": "51.4.0.24",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_025",
+    "customer_portfolio_country": "SG",
+    "account_open_date": "2025-08-12",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_025",
+    "ip_address": "51.4.0.25",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_026",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2025-06-30",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_026",
+    "ip_address": "51.1.0.26",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_027",
+    "customer_portfolio_country": "DE",
+    "account_open_date": "2023-07-09",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_shared_01",
+    "ip_address": "51.3.0.27",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_028",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2024-01-06",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_028",
+    "ip_address": "51.1.0.28",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_029",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2024-01-26",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_029",
+    "ip_address": "51.1.0.29",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_030",
+    "customer_portfolio_country": "DE",
+    "account_open_date": "2024-07-25",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_030",
+    "ip_address": "51.3.0.30",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_031",
+    "customer_portfolio_country": "DE",
+    "account_open_date": "2025-08-29",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_031",
+    "ip_address": "51.3.0.31",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_032",
+    "customer_portfolio_country": "GB",
+    "account_open_date": "2025-02-06",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_032",
+    "ip_address": "51.2.0.32",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_033",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2024-09-08",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_shared_01",
+    "ip_address": "51.1.0.33",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_034",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2023-12-07",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_034",
+    "ip_address": "51.1.0.34",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_035",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2022-12-09",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_035",
+    "ip_address": "51.1.0.35",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_036",
+    "customer_portfolio_country": "SG",
+    "account_open_date": "2024-03-29",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_036",
+    "ip_address": "51.4.0.36",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_037",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2025-09-30",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_037",
+    "ip_address": "51.1.0.37",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_038",
+    "customer_portfolio_country": "SG",
+    "account_open_date": "2025-11-18",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_038",
+    "ip_address": "51.4.0.38",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_039",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2023-10-24",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_039",
+    "ip_address": "51.1.0.39",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_040",
+    "customer_portfolio_country": "BR",
+    "account_open_date": "2024-11-16",
+    "risk_segment": "normal",
+    "device_fingerprint": "device_040",
+    "ip_address": "51.5.0.40",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_041",
+    "customer_portfolio_country": "SG",
+    "account_open_date": "2026-07-20",
+    "risk_segment": "new",
+    "device_fingerprint": "device_041",
+    "ip_address": "51.4.0.41",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_042",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2026-07-28",
+    "risk_segment": "new",
+    "device_fingerprint": "device_042",
+    "ip_address": "51.1.0.42",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_043",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2026-07-23",
+    "risk_segment": "new",
+    "device_fingerprint": "device_043",
+    "ip_address": "51.1.0.43",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_044",
+    "customer_portfolio_country": "GB",
+    "account_open_date": "2026-07-18",
+    "risk_segment": "new",
+    "device_fingerprint": "device_044",
+    "ip_address": "51.2.0.44",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_045",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2026-07-30",
+    "risk_segment": "new",
+    "device_fingerprint": "device_045",
+    "ip_address": "51.1.0.45",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_046",
+    "customer_portfolio_country": "GB",
+    "account_open_date": "2019-05-10",
+    "risk_segment": "vip",
+    "device_fingerprint": "device_046",
+    "ip_address": "51.2.0.46",
+    "typical_amount_range_usd": [
+      20,
+      400
+    ]
+  },
+  {
+    "customer_id": "cust_047",
+    "customer_portfolio_country": "GB",
+    "account_open_date": "2019-03-23",
+    "risk_segment": "vip",
+    "device_fingerprint": "device_047",
+    "ip_address": "51.2.0.47",
+    "typical_amount_range_usd": [
+      20,
+      400
+    ]
+  },
+  {
+    "customer_id": "cust_048",
+    "customer_portfolio_country": "US",
+    "account_open_date": "2019-03-25",
+    "risk_segment": "vip",
+    "device_fingerprint": "device_048",
+    "ip_address": "51.1.0.48",
+    "typical_amount_range_usd": [
+      20,
+      400
+    ]
+  },
+  {
+    "customer_id": "cust_049",
+    "customer_portfolio_country": "BR",
+    "account_open_date": "2025-09-20",
+    "risk_segment": "watchlist",
+    "device_fingerprint": "device_049",
+    "ip_address": "51.5.0.49",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  },
+  {
+    "customer_id": "cust_050",
+    "customer_portfolio_country": "GB",
+    "account_open_date": "2025-12-12",
+    "risk_segment": "watchlist",
+    "device_fingerprint": "device_050",
+    "ip_address": "51.2.0.50",
+    "typical_amount_range_usd": [
+      20,
+      200
+    ]
+  }
+]

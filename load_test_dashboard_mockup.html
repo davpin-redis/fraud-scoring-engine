@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fraud scoring load test, live dashboard</title>
+<style>
+/* =====================================================================
+   Redis UI theme (redis-theme.css) inlined for a standalone file.
+   Official Redis 2024 Digital UI tokens: Midnight + Dusk surfaces,
+   Hyper Red accent, Lily / Sky / Violet data colours.
+   ===================================================================== */
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap");
+
+:root{
+  --rds-font-sans:"Space Grotesk",system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --rds-font-mono:"Space Mono",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  --rds-radius-card:0.75rem; --rds-radius-btn:5px; --rds-radius-chip:6px; --rds-radius-pill:999px;
+  --rds-hyper:#FF4438; --rds-mars:#8A221C; --rds-midnight:#091A23;
+  --rds-lily:#DCFF1E; --rds-sky:#33C2FB; --rds-violet:#C795E3;
+}
+:root[data-theme="dark"]{
+  --rds-bg:#091A23; --rds-surface:#0D2733; --rds-surface-2:#163341; --rds-surface-hover:#2D4754;
+  --rds-border:#163341; --rds-text:#F3F3F3; --rds-muted:#8A99A0; --rds-muted-2:#5C707A; --rds-grid:#2D4754;
+  --rds-accent:var(--rds-hyper); --rds-accent-soft:rgba(255,68,56,0.16);
+  --rds-good:var(--rds-lily); --rds-info:var(--rds-sky); --rds-link:var(--rds-sky);
+  --rds-shadow:0 4px 18px rgba(9,26,35,0.50); --rds-shadow-hover:0 8px 26px rgba(255,68,56,0.18);
+  --rds-card-inset:inset 0 1px 0 rgba(255,255,255,0.04); --rds-cta-fill:#351D22;
+}
+:root[data-theme="light"]{
+  --rds-bg:#FFFFFF; --rds-surface:#FFFFFF; --rds-surface-2:#F3F5F6; --rds-surface-hover:#ECEFF1;
+  --rds-border:#E2E7E9; --rds-text:#091A23; --rds-muted:#5C707A; --rds-muted-2:#8A99A0; --rds-grid:#E2E7E9;
+  --rds-accent:var(--rds-hyper); --rds-accent-soft:rgba(255,68,56,0.10);
+  --rds-good:#2A7D4F; --rds-info:#0B73A8; --rds-link:#0B73A8;
+  --rds-shadow:0 1px 3px rgba(9,26,35,0.10),0 4px 14px rgba(9,26,35,0.06); --rds-shadow-hover:0 8px 22px rgba(255,68,56,0.12);
+  --rds-card-inset:inset 0 1px 0 rgba(255,255,255,0.6); --rds-cta-fill:var(--rds-hyper);
+}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--rds-bg);color:var(--rds-text);font-family:var(--rds-font-sans);
+  font-feature-settings:"cv11","ss01";-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;}
+h1,h2,h3{font-family:var(--rds-font-sans);letter-spacing:-0.01em;font-weight:600;margin:0;}
+*{scrollbar-width:thin;scrollbar-color:var(--rds-surface-hover) transparent;}
+
+.rds-navbar{display:flex;align-items:center;gap:1rem;padding:0.75rem 2rem;background:var(--rds-surface);
+  border-bottom:1px solid var(--rds-border);box-shadow:var(--rds-shadow);}
+.rds-brand{display:inline-flex;align-items:center;gap:0.6rem;font-weight:600;}
+.rds-brand svg{height:22px;width:auto;}
+.rds-card{background:var(--rds-surface);border:1px solid var(--rds-border);border-radius:var(--rds-radius-card);
+  box-shadow:var(--rds-card-inset),var(--rds-shadow);padding:1.1rem 1.25rem;}
+.rds-kpi{position:relative;overflow:hidden;background:var(--rds-surface);border:1px solid var(--rds-border);
+  border-radius:var(--rds-radius-card);box-shadow:var(--rds-card-inset),var(--rds-shadow);padding:1rem 1.15rem;}
+.rds-kpi::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--rds-accent);opacity:0.7;}
+.rds-kpi .rds-kpi-label{font-size:0.68rem;font-weight:600;color:var(--rds-muted);text-transform:uppercase;
+  letter-spacing:0.08em;margin-bottom:0.4rem;display:flex;align-items:center;justify-content:space-between;gap:0.4rem;}
+.rds-kpi .rds-kpi-value{font-family:var(--rds-font-mono);font-size:1.7rem;font-weight:600;line-height:1.1;
+  letter-spacing:-0.01em;font-variant-numeric:tabular-nums;}
+.rds-kpi .rds-kpi-sub{font-size:0.72rem;color:var(--rds-muted-2);margin-top:0.3rem;font-family:var(--rds-font-mono);}
+.rds-kpi.is-ok::before{background:var(--rds-good);opacity:1;} .rds-kpi.is-ok .rds-kpi-value{color:var(--rds-good);}
+.rds-kpi.is-info::before{background:var(--rds-info);opacity:1;} .rds-kpi.is-info .rds-kpi-value{color:var(--rds-info);}
+.rds-kpi.is-bad::before{background:var(--rds-accent);opacity:1;} .rds-kpi.is-bad .rds-kpi-value{color:var(--rds-accent);}
+.rds-badge{display:inline-flex;align-items:center;padding:0.15rem 0.5rem;border-radius:var(--rds-radius-pill);
+  font-size:0.68rem;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;}
+.rds-badge-soft{background:var(--rds-border);color:var(--rds-text);}
+.rds-badge-bad{background:var(--rds-accent-soft);color:var(--rds-accent);}
+.rds-badge-info{background:rgba(51,194,251,0.16);color:var(--rds-info);}
+.rds-badge-warn{background:rgba(199,149,227,0.20);color:var(--rds-violet);}
+.rds-badge-ok{background:rgba(220,255,30,0.14);color:var(--rds-good);}
+.rds-tabs{display:flex;flex-wrap:wrap;gap:0.3rem;align-items:center;}
+.rds-tab{color:var(--rds-muted);background:transparent;border:1px solid transparent;border-radius:0.4rem;
+  padding:0.4rem 0.8rem;font-size:0.85rem;font-weight:500;cursor:pointer;font-family:inherit;
+  transition:color .12s,background .12s,border-color .12s;}
+.rds-tab:hover{color:var(--rds-text);background:var(--rds-surface-hover);}
+.rds-tab.active{color:#fff;background:var(--rds-accent);border-color:var(--rds-accent);}
+.rds-section-label{font-size:0.72rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;
+  color:var(--rds-muted);margin:0 0 0.6rem;}
+.rds-progress{height:6px;border-radius:999px;background:var(--rds-surface-2);overflow:hidden;margin-top:0.55rem;}
+.rds-progress>span{display:block;height:100%;background:var(--rds-good);border-radius:999px;transition:width .5s ease;}
+
+/* ---- mockup-specific layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:1.5rem 2rem 3rem;}
+.topline{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;}
+.topline .spacer{flex:1;}
+.live-dot{width:9px;height:9px;border-radius:50%;background:var(--rds-good);display:inline-block;
+  box-shadow:0 0 0 0 rgba(220,255,30,0.6);animation:pulse 1.6s infinite;}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(220,255,30,0.5);}70%{box-shadow:0 0 0 7px rgba(220,255,30,0);}100%{box-shadow:0 0 0 0 rgba(220,255,30,0);}}
+.meta{display:flex;gap:1.5rem;flex-wrap:wrap;margin:0.4rem 0 1.25rem;color:var(--rds-muted);font-size:0.85rem;}
+.meta b{color:var(--rds-text);font-family:var(--rds-font-mono);font-weight:400;}
+.kpi-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:0.9rem;margin-bottom:1.4rem;}
+@media(max-width:1050px){.kpi-grid{grid-template-columns:repeat(3,1fr);}}
+@media(max-width:640px){.kpi-grid{grid-template-columns:repeat(2,1fr);}}
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.9rem;margin-bottom:1.4rem;}
+@media(max-width:900px){.chart-grid{grid-template-columns:1fr;}}
+.chart-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem;}
+.chart-head h3{font-size:0.95rem;}
+.legend{display:flex;gap:0.9rem;font-size:0.75rem;color:var(--rds-muted);font-family:var(--rds-font-mono);}
+.legend i{display:inline-block;width:10px;height:2px;vertical-align:middle;margin-right:0.35rem;}
+.chartbox{position:relative;height:180px;}
+.chartbox svg{position:absolute;inset:0;width:100%;height:100%;}
+.axis-lbl{position:absolute;font-family:var(--rds-font-mono);font-size:0.65rem;color:var(--rds-muted-2);
+  right:6px;transform:translateY(-50%);background:var(--rds-surface);padding:0 4px;}
+.foot{color:var(--rds-muted-2);font-size:0.78rem;line-height:1.6;margin-top:1.4rem;}
+.decisionrow{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:center;}
+.dchip{font-family:var(--rds-font-mono);font-size:0.85rem;color:var(--rds-muted);}
+.dchip b{color:var(--rds-text);}
+.flagtag{margin-left:0.5rem;}
+.controls{display:flex;gap:0.5rem;align-items:center;}
+</style>
+</head>
+<body>
+
+<div class="rds-navbar">
+  <span class="rds-brand">
+    <svg viewBox="0 0 85 27" fill="none" role="img" aria-label="Redis"><g clip-path="url(#lg)"><path fill-rule="evenodd" clip-rule="evenodd" d="M75.2909 13.8125C75.2909 10.8448 77.4892 9.12284 80.2371 9.12284C82.2888 9.12284 84.1207 10.1121 85 12.5668C84.7435 13.8125 83.2047 15.2047 82.5453 15.4246C81.9957 14.2522 81.3728 13.556 80.7866 13.556C80.0539 13.556 80.0172 14.069 80.0172 14.7284C80.0172 15.1955 80.151 15.8834 80.3119 16.7112C80.5549 17.9615 80.8599 19.5309 80.8599 21.1401C80.8599 24.0711 78.8082 26.2328 75.6573 26.2328C72.7721 26.2328 71.1778 24.3414 70.4665 21.3198C68.5818 24.6972 65.8257 26.2328 63.7134 26.2328C60.411 26.2328 59.6338 23.7919 59.7121 21.3161C58.3852 23.6612 55.831 26.2328 53.3815 26.2328C50.8809 26.2328 49.9976 24.0563 50.2002 21.5215C48.702 24.3122 45.9919 26.2328 43.3793 26.2328C40.5442 26.2328 39.141 23.9806 39.5951 21.189C37.6878 23.5333 34.1374 26.2328 30.4461 26.2328C26.2373 26.2328 24.4053 23.9632 24.1882 21.1193C22.1568 24.375 19.4187 26.3427 16.1573 26.3427C11.4493 26.3427 9.76537 22.1561 9.52032 18.7315C7.77547 21.0681 5.81377 23.4923 3.40733 26.1961C3.15086 26.4526 2.93103 26.5991 2.67457 26.5991C1.8319 26.5991 0.109914 22.8621 0 21.4698C0.723099 20.3478 5.28119 15.3398 8.95093 11.3079C10.2409 9.89066 11.4211 8.594 12.2863 7.6291C10.0389 8.30726 7.72169 9.65975 4.79957 11.7608C4.28664 12.1272 2.85776 8.7931 2.8944 6.22845C6.26509 3.73707 11.3944 2.16164 15.5345 2.16164C21.3233 2.16164 24.6573 5.38578 24.6573 9.8556C24.6573 13.5927 21.5431 17.6961 17 17.8427C14.6377 17.904 13.1237 16.578 12.3494 14.9405C12.4419 17.473 13.7587 20.5905 17.2931 20.5905C21.1462 20.5905 22.9965 18.2646 25.7559 14.7958C25.9352 14.5704 26.1183 14.3403 26.306 14.1056C28.6509 11.2112 31.3621 8.64655 35.319 8.64655C37.7371 8.64655 39.3858 10.1487 39.3858 12.4203C39.3858 15.1681 36.1616 18.9784 31.6552 18.9784C30.8855 18.9784 30.1839 18.877 29.5917 18.6766C29.5768 18.7921 29.5668 18.9058 29.5668 19.0151C29.5668 20.2974 30.0431 21.0668 32.1315 21.0668C35.2091 21.0668 38.1034 19.2349 41.6207 14.9483C45.0647 10.7349 47.6659 8.90302 50.4138 8.90302C52.2687 8.90302 53.6765 9.90832 54.2969 11.6014C57.9796 6.28253 61.1038 2.51388 63.75 0C66.3513 1.09914 68.2198 3.26078 67.7069 3.70043C65.7651 5.45905 59.2802 12.5302 56.7155 16.7435C56.056 17.8427 55.4332 19.0517 55.4332 19.6379C55.4332 20.1875 55.7629 20.3707 56.1293 20.3707C57.8898 20.3707 61.4176 16.2147 64.4645 12.6253C65.6026 11.2845 66.6736 10.0228 67.5603 9.08621C69.6121 9.92888 71.7004 11.7241 71.1875 12.347C68.4763 15.5711 66.4246 18.2091 66.4246 19.7112C66.4246 20.1142 66.5711 20.3707 67.1207 20.3707C68.1466 20.3707 69.0991 19.4547 70.6746 17.5129C71.0043 17.1099 71.4073 17.1099 71.6638 17.7328C72.3599 19.4181 73.3858 20.3341 74.1918 20.3341C75.1444 20.3341 75.6207 19.4914 75.6207 18.2091C75.6207 17.3327 75.5137 16.3138 75.4217 15.4365C75.3521 14.7733 75.2909 14.191 75.2909 13.8125ZM16.194 13.3362C18.1358 13.3362 20.2608 12.2737 20.2608 10.1121C20.2608 8.80024 19.4466 7.59084 17.2708 7.22257C17.156 7.40192 17.042 7.58017 16.9287 7.75739C15.8231 9.4858 14.7804 11.116 13.7281 12.7095C14.3586 13.0636 15.156 13.3362 16.194 13.3362ZM35.8319 13.9957C35.8319 13.4095 35.4655 13.0065 34.8793 13.0065C33.4094 13.0065 31.1923 15.0693 30.149 17.0613C30.5341 17.2101 30.9862 17.2931 31.472 17.2931C34.0733 17.2931 35.8319 15.3147 35.8319 13.9957ZM45.4677 19.3082C45.4677 19.9677 45.834 20.4073 46.6034 20.4073C48.9849 20.4073 51.9526 16.0841 51.9526 14.3254C51.9526 13.5927 51.5496 13.153 50.8901 13.153C48.7285 13.153 45.4677 17.2565 45.4677 19.3082ZM76.0599 6.08207C75.2172 7.47431 73.9349 9.04974 73.4586 9.52603C71.2603 8.61008 69.2086 6.77819 69.5017 6.26525C70.3077 4.83638 71.6267 3.29758 72.103 2.82129C74.3012 3.73724 76.353 5.60577 76.0599 6.08207Z" fill="#FF4438"/></g><defs><clipPath id="lg"><rect width="85" height="26.5991" fill="#fff"/></clipPath></defs></svg>
+    <span>Fraud scoring</span>
+  </span>
+  <span style="color:var(--rds-muted-2)">/</span>
+  <span style="color:var(--rds-muted);font-size:0.9rem">Load test dashboard</span>
+  <span class="spacer" style="flex:1"></span>
+  <span class="rds-badge rds-badge-warn">Test environment</span>
+</div>
+
+<div class="wrap">
+
+  <div class="topline">
+    <div>
+      <h1 style="font-size:1.5rem">Load test, live</h1>
+      <p style="color:var(--rds-muted);font-size:0.9rem;margin:0.25rem 0 0">Scoring engine throughput and latency against the p50 &le; 10 ms / p99 &le; 30 ms targets.</p>
+    </div>
+    <span class="spacer"></span>
+    <div class="controls">
+      <span class="live-dot" id="liveDot"></span>
+      <span class="rds-badge rds-badge-ok" id="runState">Running</span>
+    </div>
+  </div>
+
+  <div class="meta">
+    <span>Scenario <b id="mScenario">Steady-state</b></span>
+    <span>Elapsed <b id="mElapsed">00:00</b></span>
+    <span>Target <b>1,000 tx/s</b></span>
+    <span>Region <b>eu-west (test)</b></span>
+    <span>Source <b>Micrometer</b></span>
+    <span>Window <b>1s rolling</b></span>
+  </div>
+
+  <div class="rds-tabs" style="margin-bottom:1.25rem" id="scenarioTabs">
+    <button class="rds-tab active" data-s="steady">Steady-state</button>
+    <button class="rds-tab" data-s="ramp">Ramp-up</button>
+    <button class="rds-tab" data-s="burst">Burst / peak</button>
+    <button class="rds-tab" data-s="soak">Soak</button>
+    <button class="rds-tab" data-s="failure">Failure injection</button>
+  </div>
+
+  <!-- KPI row: the §13.5 displayed fields -->
+  <div class="kpi-grid">
+    <div class="rds-kpi is-info">
+      <div class="rds-kpi-label">Processed</div>
+      <div class="rds-kpi-value" id="kProcessed">0</div>
+      <div class="rds-kpi-sub">total since start</div>
+    </div>
+    <div class="rds-kpi is-info" id="kTpsCard">
+      <div class="rds-kpi-label">Throughput</div>
+      <div class="rds-kpi-value" id="kTps">0<span style="font-size:0.9rem;color:var(--rds-muted)"> tx/s</span></div>
+      <div class="rds-kpi-sub">target 1,000 tx/s</div>
+      <div class="rds-progress"><span id="kTpsBar" style="width:0%"></span></div>
+    </div>
+    <div class="rds-kpi is-ok">
+      <div class="rds-kpi-label">Pass</div>
+      <div class="rds-kpi-value" id="kPass">0</div>
+      <div class="rds-kpi-sub"><span id="kPassPct">100.000%</span> of requests</div>
+    </div>
+    <div class="rds-kpi is-ok" id="kFailCard">
+      <div class="rds-kpi-label">Fail</div>
+      <div class="rds-kpi-value" id="kFail">0</div>
+      <div class="rds-kpi-sub"><span id="kFailPct">0.000%</span> transport / 5xx</div>
+    </div>
+    <div class="rds-kpi is-ok" id="kP50Card">
+      <div class="rds-kpi-label">p50 latency</div>
+      <div class="rds-kpi-value" id="kP50">0.0<span style="font-size:0.9rem;color:var(--rds-muted)"> ms</span></div>
+      <div class="rds-kpi-sub">target &le; 10 ms</div>
+    </div>
+    <div class="rds-kpi is-ok" id="kP99Card">
+      <div class="rds-kpi-label">p99 latency <span id="p99Flag"></span></div>
+      <div class="rds-kpi-value" id="kP99">0.0<span style="font-size:0.9rem;color:var(--rds-muted)"> ms</span></div>
+      <div class="rds-kpi-sub">target &le; 30 ms</div>
+    </div>
+  </div>
+
+  <!-- Rolling time-series -->
+  <div class="chart-grid">
+    <div class="rds-card">
+      <div class="chart-head">
+        <h3>Throughput</h3>
+        <div class="legend"><span><i style="background:var(--rds-good)"></i>tx/s</span><span><i style="background:var(--rds-muted-2)"></i>target 1,000</span></div>
+      </div>
+      <div class="chartbox">
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+          <line x1="0" y1="80" x2="100" y2="80" stroke="var(--rds-grid)" stroke-width="0.4" stroke-dasharray="1.5 1.5"/>
+          <line x1="0" y1="40" x2="100" y2="40" stroke="var(--rds-grid)" stroke-width="0.4" stroke-dasharray="1.5 1.5"/>
+          <line id="tpsTarget" x1="0" y1="40" x2="100" y2="40" stroke="var(--rds-muted-2)" stroke-width="0.5" stroke-dasharray="2 2"/>
+          <polyline id="tpsLine" fill="none" stroke="var(--rds-good)" stroke-width="1.1" stroke-linejoin="round" points=""/>
+        </svg>
+        <span class="axis-lbl" style="top:40%">1,000</span>
+      </div>
+    </div>
+
+    <div class="rds-card">
+      <div class="chart-head">
+        <h3>Latency</h3>
+        <div class="legend"><span><i style="background:var(--rds-info)"></i>p50</span><span><i style="background:var(--rds-violet)"></i>p99</span><span><i style="background:var(--rds-accent)"></i>30 ms</span></div>
+      </div>
+      <div class="chartbox">
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+          <line id="latThreshold" x1="0" y1="33.3" x2="100" y2="33.3" stroke="var(--rds-accent)" stroke-width="0.5" stroke-dasharray="2 2" opacity="0.8"/>
+          <line x1="0" y1="66.6" x2="100" y2="66.6" stroke="var(--rds-grid)" stroke-width="0.4" stroke-dasharray="1.5 1.5"/>
+          <polyline id="p99Line" fill="none" stroke="var(--rds-violet)" stroke-width="1.1" stroke-linejoin="round" points=""/>
+          <polyline id="p50Line" fill="none" stroke="var(--rds-info)" stroke-width="1.1" stroke-linejoin="round" points=""/>
+        </svg>
+        <span class="axis-lbl" style="top:33.3%;color:var(--rds-accent)">30 ms</span>
+        <span class="axis-lbl" style="top:66.6%">15 ms</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Secondary, informational: decision mix (distinct from load-test pass/fail, per §13.5) -->
+  <div class="rds-card">
+    <div class="rds-section-label" style="margin-bottom:0.85rem">Decision mix <span class="rds-badge rds-badge-soft" style="margin-left:0.4rem">informational</span></div>
+    <div class="decisionrow">
+      <span class="dchip"><i class="rds-badge rds-badge-ok" style="margin-right:0.4rem">approve</i><b id="dApprove">0%</b></span>
+      <span class="dchip"><i class="rds-badge rds-badge-warn" style="margin-right:0.4rem">review</i><b id="dReview">0%</b></span>
+      <span class="dchip"><i class="rds-badge rds-badge-bad" style="margin-right:0.4rem">decline</i><b id="dDecline">0%</b></span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="dchip" style="color:var(--rds-muted-2)">a decline is a correct, successful response, not a failure</span>
+    </div>
+  </div>
+
+  <p class="foot">
+    Simulated data by default; append <code>?live=http://localhost:8082</code> to poll a running engine's <code>/metrics/live</code> (§13.5). Metrics read from the scoring engine's own Micrometer counters, not the Gatling client, so figures reflect what the service measured. Pass = a request that received a scored decision (approve / review / decline); fail = a transport error, timeout, or 5xx. p99 turns Hyper Red when it crosses the 30 ms target. Active-run view only, in the dedicated test environment (§13.4); this is not the production monitoring dashboard (§10).
+  </p>
+
+</div>
+
+<script>
+(function(){
+  var MAXPTS = 60;
+  var tps = [], p50 = [], p99 = [];
+  var processed = 0, passCount = 0, failCount = 0, elapsed = 0;
+  var current = "steady";
+  var rampProgress = 0, soakDrift = 0;
+  // Live mode: append ?live=http://host:port to poll a running engine's /metrics/live.
+  var liveBase = new URLSearchParams(location.search).get('live');
+  var prevProcessed = null, prevServerTime = null;
+
+  var scenarios = {
+    steady:  {name:"Steady-state",   target:1000},
+    ramp:    {name:"Ramp-up",        target:1000},
+    burst:   {name:"Burst / peak",   target:4000},
+    soak:    {name:"Soak",           target:1000},
+    failure: {name:"Failure injection", target:1000}
+  };
+
+  function rnd(a,b){ return a + Math.random()*(b-a); }
+
+  function resetRun(){
+    tps=[]; p50=[]; p99=[]; processed=0; passCount=0; failCount=0; elapsed=0;
+    rampProgress=0; soakDrift=0;
+  }
+
+  function tick(){
+    elapsed++;
+    var sc = scenarios[current];
+    var tp, latP50, latP99, failRate;
+
+    // throughput
+    if(current==="ramp"){
+      rampProgress = Math.min(1, rampProgress + 1/18);
+      tp = sc.target * rampProgress * rnd(0.97,1.03);
+    } else {
+      tp = sc.target * rnd(0.965,1.035);
+    }
+
+    // latency + fail behaviour per scenario
+    if(current==="failure"){
+      latP50 = rnd(9,14);
+      latP99 = rnd(26,44);                 // fallback path: frequent breaches
+      failRate = rnd(0.004,0.018);
+    } else if(current==="burst"){
+      latP50 = rnd(8,12);
+      latP99 = rnd(22,34) + (Math.random()<0.25?rnd(0,8):0);
+      failRate = rnd(0,0.0006);
+    } else if(current==="soak"){
+      soakDrift += 0.04;                   // slow tail-latency creep
+      latP50 = rnd(6,9) + soakDrift*0.15;
+      latP99 = rnd(18,25) + soakDrift + (Math.random()<0.06?rnd(0,10):0);
+      failRate = rnd(0,0.0004);
+    } else { // steady / ramp
+      latP50 = rnd(6,9.5);
+      latP99 = rnd(17,26) + (Math.random()<0.05?rnd(0,9):0);
+      failRate = rnd(0,0.0004);
+    }
+
+    var inc = Math.max(0, Math.round(tp));
+    var fails = 0;
+    for(var i=0;i<inc;i++){ if(Math.random()<failRate) fails++; }
+    processed += inc; failCount += fails; passCount += (inc - fails);
+
+    push(tps, tp); push(p50, latP50); push(p99, latP99);
+    render(tp, latP50, latP99);
+  }
+
+  function push(arr,v){ arr.push(v); if(arr.length>MAXPTS) arr.shift(); }
+
+  function fmt(n){ return n.toLocaleString("en-US"); }
+  function pct(n,d){ return (d===0?0:(n/d*100)); }
+
+  function poly(arr, ymin, ymax){
+    if(arr.length<2) return "";
+    var n=arr.length, out=[];
+    for(var i=0;i<n;i++){
+      var x = (i/(MAXPTS-1))*100;
+      var t = (arr[i]-ymin)/(ymax-ymin);
+      t = Math.max(0,Math.min(1,t));
+      var y = 100 - t*100;
+      out.push(x.toFixed(2)+","+y.toFixed(2));
+    }
+    return out.join(" ");
+  }
+
+  function setCard(id, cls){
+    var el=document.getElementById(id);
+    el.classList.remove("is-ok","is-info","is-bad");
+    el.classList.add(cls);
+  }
+
+  function render(tp, latP50, latP99){
+    document.getElementById("mElapsed").textContent =
+      String(Math.floor(elapsed/60)).padStart(2,"0")+":"+String(elapsed%60).padStart(2,"0");
+
+    document.getElementById("kProcessed").textContent = fmt(processed);
+
+    document.getElementById("kTps").innerHTML = fmt(Math.round(tp)) +
+      '<span style="font-size:0.9rem;color:var(--rds-muted)"> tx/s</span>';
+    var bar = Math.min(100, tp/1000*100);
+    document.getElementById("kTpsBar").style.width = bar.toFixed(0)+"%";
+    setCard("kTpsCard", tp>=950 ? "is-ok" : "is-info");
+
+    var pp = pct(passCount, processed), fp = pct(failCount, processed);
+    document.getElementById("kPass").textContent = fmt(passCount);
+    document.getElementById("kPassPct").textContent = pp.toFixed(3)+"%";
+    document.getElementById("kFail").textContent = fmt(failCount);
+    document.getElementById("kFailPct").textContent = fp.toFixed(3)+"%";
+    setCard("kFailCard", failCount===0 ? "is-ok" : (fp>0.5 ? "is-bad":"is-info"));
+
+    document.getElementById("kP50").innerHTML = latP50.toFixed(1) +
+      '<span style="font-size:0.9rem;color:var(--rds-muted)"> ms</span>';
+    setCard("kP50Card", latP50<=10 ? "is-ok" : "is-bad");
+
+    document.getElementById("kP99").innerHTML = latP99.toFixed(1) +
+      '<span style="font-size:0.9rem;color:var(--rds-muted)"> ms</span>';
+    var over = latP99>30;
+    setCard("kP99Card", over ? "is-bad" : "is-ok");
+    document.getElementById("p99Flag").innerHTML = over ?
+      '<span class="rds-badge rds-badge-bad flagtag">over target</span>' : '';
+
+    // charts
+    document.getElementById("tpsLine").setAttribute("points", poly(tps, 0, Math.max(1300, scenarios[current].target*1.15)));
+    // target line position for current y-scale
+    var tScaleMax = Math.max(1300, scenarios[current].target*1.15);
+    var ty = 100 - (1000/tScaleMax)*100;
+    document.getElementById("tpsTarget").setAttribute("y1", ty.toFixed(1));
+    document.getElementById("tpsTarget").setAttribute("y2", ty.toFixed(1));
+
+    document.getElementById("p50Line").setAttribute("points", poly(p50, 0, 45));
+    document.getElementById("p99Line").setAttribute("points", poly(p99, 0, 45));
+    document.getElementById("p99Line").setAttribute("stroke", over ? "var(--rds-accent)" : "var(--rds-violet)");
+
+    // decision mix (illustrative)
+    var reviewShare = current==="failure" ? 9 : (current==="burst"?4:3);
+    var declineShare = current==="failure" ? 2.5 : 1.4;
+    var approveShare = 100 - reviewShare - declineShare;
+    document.getElementById("dApprove").textContent = approveShare.toFixed(1)+"%";
+    document.getElementById("dReview").textContent = reviewShare.toFixed(1)+"%";
+    document.getElementById("dDecline").textContent = declineShare.toFixed(1)+"%";
+  }
+
+  // scenario tabs
+  document.getElementById("scenarioTabs").addEventListener("click", function(e){
+    var b = e.target.closest(".rds-tab"); if(!b) return;
+    [].forEach.call(this.querySelectorAll(".rds-tab"), function(t){ t.classList.remove("active"); });
+    b.classList.add("active");
+    current = b.getAttribute("data-s");
+    document.getElementById("mScenario").textContent = scenarios[current].name;
+    resetRun();
+  });
+
+  // Live mode: read the engine's own metrics (§13.5) instead of simulating.
+  async function tickLive() {
+    try {
+      var r = await fetch(liveBase.replace(/\/$/, '') + '/metrics/live', { cache: 'no-store' });
+      var s = await r.json();
+      elapsed++;
+      var tp = 0;
+      if (prevProcessed !== null && s.server_time_ms > prevServerTime) {
+        tp = (s.processed - prevProcessed) / ((s.server_time_ms - prevServerTime) / 1000);
+      }
+      prevProcessed = s.processed; prevServerTime = s.server_time_ms;
+      processed = s.processed; passCount = s.pass; failCount = s.fail;
+      push(tps, tp); push(p50, s.p50_ms); push(p99, s.p99_ms);
+      render(tp, s.p50_ms, s.p99_ms);
+      var dsum = (s.approve + s.review + s.decline) || 1;
+      document.getElementById("dApprove").textContent = (s.approve / dsum * 100).toFixed(1) + "%";
+      document.getElementById("dReview").textContent = (s.review / dsum * 100).toFixed(1) + "%";
+      document.getElementById("dDecline").textContent = (s.decline / dsum * 100).toFixed(1) + "%";
+    } catch (e) { /* transient fetch error: keep the last frame */ }
+  }
+
+  if (liveBase) {
+    document.getElementById("mScenario").textContent = "Live (engine)";
+    document.getElementById("runState").textContent = "Live";
+    [].forEach.call(document.querySelectorAll('#scenarioTabs .rds-tab'), function (t) {
+      t.style.opacity = 0.4; t.style.pointerEvents = 'none';
+    });
+    tickLive();
+    setInterval(tickLive, 1000);
+  } else {
+    // seed a couple of points so lines appear immediately, then simulate at 1s
+    tick(); tick();
+    setInterval(tick, 1000);
+  }
+})();
+</script>
+</body>
+</html>

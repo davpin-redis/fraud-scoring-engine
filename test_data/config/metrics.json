@@ -1,0 +1,51 @@
+[
+  {
+    "metric_id": "time_since_last_failed_logon_24h_hrs",
+    "entity": "customer_id",
+    "type": "time_since_last_event",
+    "event_type": "failed_logon",
+    "window_id": "last_24h"
+  },
+  {
+    "metric_id": "customerid_stddev_sendertransactionamo_1d",
+    "entity": "customer_id",
+    "type": "streaming_aggregate",
+    "agg": "stddev",
+    "field": "amount_base",
+    "window_id": "last_24h"
+  },
+  {
+    "metric_id": "c_snd_3rd_lst_pymt_dt_1h_rt",
+    "entity": "customer_id",
+    "type": "positional",
+    "field": "payment_ts",
+    "position": 2,
+    "window_id": "last_24h",
+    "sub_window_sec": 3600
+  },
+  {
+    "metric_id": "customer_txn_count_1h",
+    "entity": "customer_id",
+    "type": "streaming_aggregate",
+    "agg": "count",
+    "field": "amount_base",
+    "window_id": "last_24h",
+    "sub_window_sec": 3600
+  },
+  {
+    "metric_id": "bene_distinct_senders_24h",
+    "entity": "receiver_transaction_bank_account_number",
+    "type": "streaming_aggregate",
+    "agg": "distinct_count",
+    "field": "customer_id",
+    "window_id": "last_24h"
+  },
+  {
+    "metric_id": "pair_txn_count_90d",
+    "entity": "[customer_id, receiver_transaction_bank_account_number]",
+    "type": "streaming_aggregate",
+    "agg": "count",
+    "field": "amount_base",
+    "window_id": "aged_24h_90d"
+  }
+]

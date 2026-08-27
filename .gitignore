@@ -1,0 +1,51 @@
+# ---- Claude / assistant state ----
+.claude/
+**/.claude/
+.cc-writes/
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- Java / Maven ----
+target/
+**/target/
+.mvnhome/
+**/.mvnhome/
+.mvn/wrapper/maven-wrapper.jar
+
+# ---- Runtime / generated data ----
+engine/data/
+*.rdb
+*.aof
+dump.rdb
+
+# ---- Load-test outputs (large; may embed hostnames/IPs) ----
+initialresults/
+secondtests/
+thirdtests/
+**/target/gatling/
+results/
+
+# ---- Local config / secrets (never commit) ----
+.env
+.env.*
+*.local
+secrets.*
+*.pem
+*.key
+*.p12
+*.pfx
+application-local.yml
+application-local.yaml
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

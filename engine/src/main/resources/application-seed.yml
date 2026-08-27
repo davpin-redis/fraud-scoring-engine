@@ -1,0 +1,6 @@
+# Profile for the one-shot transaction-store seeder (TransactionSeeder, §13).
+# Runs no web server — it boots the context, writes history, and exits.
+spring:
+  main:
+    web-application-type: none
+    banner-mode: "off"

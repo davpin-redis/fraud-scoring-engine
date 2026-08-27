@@ -1,0 +1,37 @@
+# Local dev infra for the fraud scoring engine — two RAM Redis databases (§7.12,
+# revised: the Flex transaction store is removed). The feature store holds 24h
+# exact signals + aggregates; the signal store holds the 90d approximate signals
+# (HyperLogLog / counters / rolling stats — core types only, so plain redis:8 with
+# no modules). Every scored txn also flows to the (not-yet-implemented) audit sink.
+services:
+  redis-feature:
+    image: redis:8
+    container_name: fraud-redis-feature   # feature store (24h exact + aggregates + reference)
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - redis-feature-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-signal:
+    image: redis:8
+    container_name: fraud-redis-signal     # signal store (90d approximate signals)
+    ports:
+      - "6381:6379"
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - redis-signal-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-feature-data:
+  redis-signal-data:
