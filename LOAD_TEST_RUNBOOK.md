@@ -12,14 +12,15 @@ You have already provisioned:
 | Component | Setup |
 |---|---|
 | **Feature store cluster** | 3× `n2d-highmem-8`, no disks, 9 shards, all-master (no HA). Holds 24h exact signals + aggregates + reference. **Plain Redis — no modules required.** |
-| **Signal store cluster** | 3× `n2d-highmem-8`, no disks, all-master (no HA). Holds 90d signals: HyperLogLog / counters / hashes + **RedisTimeSeries** (velocity + behavioural rules R019–R026). TimeSeries is **bundled in Redis 8 / Redis Enterprise** — no separate install. No flash. |
+| **Signal store cluster** | 3× `n2d-highmem-8`, no disks, all-master (no HA). Holds 90d signals: HyperLogLog / counters / hashes + **fixed-width bucket hashes with per-field TTL** (`HEXPIRE`) + a capped events list (velocity + behavioural rules R017/R019–R026). **Core types only — no modules.** Bounded constant-size reads. No flash. |
 | **Engine VMs** | 3× `e2-standard-8`, JDK 25 installed. |
 | **Gatling VM** | 1× `e2-standard-8`, JDK 25 installed. |
 
 > The signal store is now RAM-only and **bounded** (a few KB per entity: HLLs cap at
 > ~12 KB, plus small counters/stats) — no more billion-doc index, no Flex/NVMe, no
-> RAM-ceiling. No `search`/`bf` modules; the signal store uses **RedisTimeSeries**
-> for the velocity + behavioural signals, which is bundled in Redis 8 / Redis Enterprise.
+> RAM-ceiling. **No modules** on the signal store; the velocity + behavioural signals
+> use core **fixed-width bucket hashes with per-field TTL** (`HEXPIRE`, Redis 8), so each
+> read returns a bounded, constant-size reply (flat egress under soak).
 
 **This runbook covers what's left:** the engine **load balancer**, engine
 deploy/config, loading + pre-warming the two stores, and running/monitoring the test.
@@ -142,7 +143,7 @@ daily history) ≈ ~100M ops for 5M → **~5–10 min on a single seeder VM**. N
 needed at 5M.
 
 > The seeder pre-warms the distinct/count/amount signals (R005/R012/R013/R018). The
-> **TimeSeries behavioural signals (R019–R026** — velocity vs baseline, sustained
+> **Behavioural bucket-hash signals (R017, R019–R026** — velocity vs baseline, sustained
 > elevation, circadian, cadence, bust-out, dormancy, device/payee velocity surge) **build up live** as
 > the engine scores during the run; they need no pre-seed (and by design need history
 > to accumulate before they engage).
@@ -318,15 +319,15 @@ accurate than the earlier estimates.
 | Tier | VMs | Shards | Measured basis (extrapolated to 5M) |
 |---|---|---|---|
 | **Feature store** (RAM) | **3× `n2d-highmem-8`** (8 vCPU / 64 GB = 192 GB) | **9 master** | **20.6 KB/customer × 5M ≈ ~105 GB** (~55% util); reads are trivial RAM lookups |
-| **Signal store** (RAM + TimeSeries) | **3× `n2d-highmem-8`** (8 vCPU / 64 GB = 192 GB) | **9 master** | **~90 GB** = TS velocity (4.4 KB/series) + TS amount (12.7 KB/series) ≈ 88 GB + non-TS HLL/counters/hash (0.35 KB/cust ≈ 1.8 GB) (~47% util) |
+| **Signal store** (RAM, core types) | **3× `n2d-highmem-8`** (8 vCPU / 64 GB = 192 GB) | **9 master** | **< 20 GB** = HLL/counters/z-score hash (~0.35 KB/cust ≈ 1.8 GB) + bounded bucket hashes + capped events list (~1–3 KB/active cust). Far lower than the earlier TimeSeries estimate (~90 GB) — the bucket hashes hold only fixed windows, not full-resolution series. Comfortable headroom; single-node would suffice on RAM, keep 3×/9-shard for CPU + HA. |
 | **Engine** | **3× `e2-standard-4`** (4 vCPU / 16 GB) behind an internal L4 LB | — | **~1.1 ms CPU/txn** (measured) → ~1.1 core @ 1000 tx/s → ~0.4 core/VM; 3 VMs for LB + N+1 + burst headroom. `-Xmx2g` |
 | **Gatling** | **1× `e2-standard-8`** (transient) | — | tune sysctl (§7); **2 injectors** for the 4k burst scenario |
 
 Sizing notes:
 - **The engine is far lighter than first estimated** — measured ~1.1 ms CPU/txn (not ~5–7), so 1000 tx/s needs only ~1 core total. `e2-standard-4` ×3 is generous; the 3 VMs are for availability/LB/burst, not raw throughput. Heap drops to `-Xmx2g` (working set is small).
-- **The amount TimeSeries is the signal store's RAM driver** — 12.7 KB/series (random amounts compress poorly) vs 4.4 KB for velocity, so it's ~74% of the TS RAM. If you don't need full-resolution amount history, a **downsampled amount series (daily/weekly compaction)** cuts the signal store roughly in half. (The amount **z-score** already comes from the count/sum/sumsq hash, so the amount TS is only for the R023 bust-out trend.)
+- **The signal store is no longer a RAM driver.** Replacing the per-customer velocity/amount TimeSeries (which grew to ~90 GB and, worse, returned ever-larger `TS.RANGE` replies under soak) with fixed-width bucket hashes bounds both RAM and per-call egress: each customer holds ≤ ~170 hourly + ≤ 24 five-min velocity buckets, ≤ 8 weekly amount buckets, a ≤ 64-element events list, and a last-event marker — all self-trimming via per-field TTL. The amount z-score still comes from the count/sum/sumsq monthly hash; R023 bust-out trend now reads the small weekly bucket hashes.
 - **No-HA / single copy.** For HA, add one replica per shard → ~2× the Redis node count.
-- **Burst 4–5k tx/s:** the engine is stateless — scale to 5–6 VMs; the Redis tiers have ample headroom, though the signal store's `TS.RANGE` aggregation is the first thing to watch (bump its vCPU to `n2d-highmem-16` if TS-read CPU climbs).
+- **Burst 4–5k tx/s:** the engine is stateless — scale to 5–6 VMs; both Redis tiers have ample headroom. Signal-store reads are now bounded constant-size `HGETALL`s (no growing `TS.RANGE`), so per-call cost is flat; watch per-shard CPU for key-skew, not reply growth.
 - **Approx cost** (GCP on-demand, us-central1): ~$1.9k/mo (feature ~$0.7k + signal ~$0.7k + engines ~$0.3k + Gatling ~$0.2k); ~**$1.2k/mo with a 1-yr CUD**. Verify in the pricing calculator.
 
 ---

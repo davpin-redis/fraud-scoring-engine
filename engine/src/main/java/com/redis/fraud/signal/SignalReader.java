@@ -12,6 +12,7 @@ import io.lettuce.core.api.async.RedisAsyncCommands;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,7 +40,6 @@ public class SignalReader {
     private static final long HOUR_MS = 3_600_000L;
     private static final long DAY_MS = 86_400_000L;
     private static final long MIN5_MS = 300_000L;
-    private static final long WEEK_MS = 604_800_000L;
     private static final int MIN_BASELINE_HOURS = 24;   // active hours needed before rate/circadian signals engage
     private static final int MIN_GAP_SAMPLES = 5;
     private static final int MIN_TREND_WEEKS = 4;
@@ -81,18 +81,19 @@ public class SignalReader {
             amtF.add(sa.hmget(k, "cnt", "sum", "sumsq"));
         }
 
-        // ---- 90d time-shaped (RedisTimeSeries, tolerated individually) ----
-        RedisFuture<List<Object>> velHourlyF =
-                SignalTimeSeries.rangeAgg(sa, SignalKeys.velocityTs(cid), nowMs - 7 * DAY_MS, nowMs, "count", HOUR_MS);
-        RedisFuture<List<Object>> velRecentF =
-                SignalTimeSeries.range(sa, SignalKeys.velocityTs(cid), nowMs - 2 * HOUR_MS, nowMs);
-        RedisFuture<List<Object>> velLastF = SignalTimeSeries.get(sa, SignalKeys.velocityTs(cid));
-        RedisFuture<List<Object>> amtWeeklyF =
-                SignalTimeSeries.rangeAgg(sa, SignalKeys.amountTs(cid), nowMs - 56 * DAY_MS, nowMs, "avg", WEEK_MS);
-        RedisFuture<List<Object>> deviceRecentF = (device == null || device.isBlank()) ? null
-                : SignalTimeSeries.rangeAgg(sa, SignalKeys.deviceVelocityTs(device), nowMs - 6 * HOUR_MS, nowMs, "count", MIN5_MS);
-        RedisFuture<List<Object>> beneRecentF = (bene == null || bene.isBlank()) ? null
-                : SignalTimeSeries.rangeAgg(sa, SignalKeys.beneVelocityTs(bene), nowMs - 6 * HOUR_MS, nowMs, "count", MIN5_MS);
+        // ---- behavioural rollups: bounded bucket hashes + capped event list (tolerated individually) ----
+        // Each HGETALL/LRANGE returns a fixed-bounded field/element count (window ÷ bucket width, or
+        // the list cap), so egress per call is constant regardless of run length or key hotness.
+        RedisFuture<Map<String, String>> vhF = sa.hgetall(SignalKeys.velocityHour(cid));
+        RedisFuture<Map<String, String>> v5F = sa.hgetall(SignalKeys.velocity5m(cid));
+        RedisFuture<List<String>> etsF = sa.lrange(SignalKeys.recentEvents(cid), 0, -1);
+        RedisFuture<String> ltsF = sa.get(SignalKeys.lastEventTs(cid));
+        RedisFuture<Map<String, String>> awsF = sa.hgetall(SignalKeys.amountWeekSum(cid));
+        RedisFuture<Map<String, String>> awcF = sa.hgetall(SignalKeys.amountWeekCount(cid));
+        RedisFuture<Map<String, String>> devF = (device == null || device.isBlank()) ? null
+                : sa.hgetall(SignalKeys.deviceSurge5m(device));
+        RedisFuture<Map<String, String>> beneF = (bene == null || bene.isBlank()) ? null
+                : sa.hgetall(SignalKeys.beneSurge5m(bene));
 
         fa.flushCommands();
         sa.flushCommands();
@@ -110,18 +111,18 @@ public class SignalReader {
         out.put(SignalNames.BENE_DISTINCT_SENDERS_90D, get(senders90dF));
         out.put(SignalNames.AMOUNT_ZSCORE_90D, zscore(amtF, amount));
 
-        // ---- TimeSeries-derived signals ----
-        List<Sample> hourly = SignalTimeSeries.parse(tolerant(velHourlyF));
-        List<Sample> recent = SignalTimeSeries.parse(tolerant(velRecentF));
-        List<Sample> last = SignalTimeSeries.parse(tolerant(velLastF));
-        List<Sample> weekly = SignalTimeSeries.parse(tolerant(amtWeeklyF));
-        List<Sample> deviceRecent = deviceRecentF == null ? List.of() : SignalTimeSeries.parse(tolerant(deviceRecentF));
-        List<Sample> beneRecent = beneRecentF == null ? List.of() : SignalTimeSeries.parse(tolerant(beneRecentF));
+        // ---- rollup-derived signals (same statistics as before, sourced from bounded hashes) ----
+        List<Sample> hourly = bucketsInWindow(tolerantMap(vhF), nowMs - 7 * DAY_MS, nowMs);
+        List<Sample> five = bucketsInWindow(tolerantMap(v5F), nowMs - 2 * HOUR_MS, nowMs);
+        List<Long> events = eventTimestamps(tolerantList(etsF));   // ascending
+        List<Sample> weekly = weeklyAverages(tolerantMap(awsF), tolerantMap(awcF), nowMs - 56 * DAY_MS, nowMs);
+        List<Sample> deviceRecent = devF == null ? List.of() : bucketsInWindow(tolerantMap(devF), nowMs - 6 * HOUR_MS, nowMs);
+        List<Sample> beneRecent = beneF == null ? List.of() : bucketsInWindow(tolerantMap(beneF), nowMs - 6 * HOUR_MS, nowMs);
 
         double baseline = mean(hourly);
         double current1h = sumSince(hourly, nowMs - HOUR_MS);
         out.put(SignalNames.CUSTOMER_TXN_RATE_1H, (long) current1h);
-        out.put(SignalNames.CUSTOMER_TXN_RATE_5M, (long) countSince(recent, nowMs - MIN5_MS));
+        out.put(SignalNames.CUSTOMER_TXN_RATE_5M, (long) sumSince(five, nowMs - MIN5_MS));
         if (hourly.size() >= MIN_BASELINE_HOURS && baseline > 0) {
             out.put(SignalNames.VELOCITY_RATIO_1H, current1h / baseline);
             long elevated = hourly.stream()
@@ -130,8 +131,9 @@ public class SignalReader {
             out.put(SignalNames.VELOCITY_ELEVATED_HOURS, elevated);
             out.put(SignalNames.HOD_SHARE_NOW, hourOfDayShare(hourly, nowMs));
         }
-        out.put(SignalNames.INTERARRIVAL_CV, interarrivalCv(recent));
-        out.put(SignalNames.DORMANCY_DAYS, last.isEmpty() ? 0.0 : (nowMs - last.get(last.size() - 1).timestampMs()) / (double) DAY_MS);
+        out.put(SignalNames.INTERARRIVAL_CV, interarrivalCv(events));
+        long lastTs = tolerantLong(ltsF);
+        out.put(SignalNames.DORMANCY_DAYS, lastTs <= 0 ? 0.0 : (nowMs - lastTs) / (double) DAY_MS);
         out.put(SignalNames.AMOUNT_TREND, amountTrend(weekly));
         out.put(SignalNames.DEVICE_SURGE, surge(deviceRecent, nowMs));
         out.put(SignalNames.BENE_SURGE, surge(beneRecent, nowMs));
@@ -183,10 +185,6 @@ public class SignalReader {
         return sum;
     }
 
-    private static long countSince(List<Sample> s, long fromMs) {
-        return s.stream().filter(x -> x.timestampMs() >= fromMs).count();
-    }
-
     /** Share of the customer's activity that falls in the current UTC hour-of-day (low = off-hour). */
     private static double hourOfDayShare(List<Sample> hourly, long nowMs) {
         double total = 0;
@@ -201,14 +199,14 @@ public class SignalReader {
         return total <= 0 ? 1.0 : inNowHod / total;
     }
 
-    /** Coefficient of variation of inter-arrival gaps (low = machine-like cadence). */
-    private static double interarrivalCv(List<Sample> recent) {
-        if (recent.size() < MIN_GAP_SAMPLES) {
+    /** Coefficient of variation of inter-arrival gaps over the recent event timestamps (low = machine-like cadence). */
+    private static double interarrivalCv(List<Long> tsAscending) {
+        if (tsAscending.size() < MIN_GAP_SAMPLES) {
             return 999.0;
         }
         List<Long> gaps = new ArrayList<>();
-        for (int i = 1; i < recent.size(); i++) {
-            gaps.add(recent.get(i).timestampMs() - recent.get(i - 1).timestampMs());
+        for (int i = 1; i < tsAscending.size(); i++) {
+            gaps.add(tsAscending.get(i) - tsAscending.get(i - 1));
         }
         double m = gaps.stream().mapToLong(Long::longValue).average().orElse(0);
         if (m <= 0) {
@@ -302,10 +300,93 @@ public class SignalReader {
         }
     }
 
-    /** Tolerant getter for TimeSeries reads: a missing series (new customer) → no history. */
-    private static List<Object> tolerant(RedisFuture<List<Object>> f) {
+    // ---- rollup parsing (bounded hashes / capped list) ----
+
+    /** Bucket-hash fields (field = bucket-start ms, value = count/sum) → samples within the window, ascending. */
+    private static List<Sample> bucketsInWindow(Map<String, String> h, long fromMs, long toMs) {
+        if (h == null || h.isEmpty()) {
+            return List.of();
+        }
+        List<Sample> out = new ArrayList<>(h.size());
+        for (Map.Entry<String, String> e : h.entrySet()) {
+            long ts = Long.parseLong(e.getKey());
+            if (ts >= fromMs && ts <= toMs) {
+                out.add(new Sample(ts, Double.parseDouble(e.getValue())));
+            }
+        }
+        out.sort(Comparator.comparingLong(Sample::timestampMs));
+        return out;
+    }
+
+    /** Capped list of event timestamps (stored newest-first) → ascending longs. */
+    private static List<Long> eventTimestamps(List<String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return List.of();
+        }
+        List<Long> ts = new ArrayList<>(raw.size());
+        for (String s : raw) {
+            ts.add(Long.parseLong(s));
+        }
+        ts.sort(Long::compare);
+        return ts;
+    }
+
+    /** Weekly (sum, count) bucket hashes → per-week average amount samples within the window, ascending. */
+    private static List<Sample> weeklyAverages(Map<String, String> sums, Map<String, String> counts,
+                                               long fromMs, long toMs) {
+        if (sums == null || sums.isEmpty() || counts == null) {
+            return List.of();
+        }
+        List<Sample> out = new ArrayList<>(sums.size());
+        for (Map.Entry<String, String> e : sums.entrySet()) {
+            long ts = Long.parseLong(e.getKey());
+            if (ts < fromMs || ts > toMs) {
+                continue;
+            }
+            String c = counts.get(e.getKey());
+            double cnt = c == null ? 0.0 : Double.parseDouble(c);
+            if (cnt <= 0) {
+                continue;
+            }
+            out.add(new Sample(ts, Double.parseDouble(e.getValue()) / cnt));
+        }
+        out.sort(Comparator.comparingLong(Sample::timestampMs));
+        return out;
+    }
+
+    /** Tolerant hash read: a missing key (new entity) or a failed read → no history. */
+    private static Map<String, String> tolerantMap(RedisFuture<Map<String, String>> f) {
+        if (f == null) {
+            return Map.of();
+        }
         try {
-            List<Object> v = f.get(AWAIT_MS, TimeUnit.MILLISECONDS);
+            Map<String, String> v = f.get(AWAIT_MS, TimeUnit.MILLISECONDS);
+            return v == null ? Map.of() : v;
+        } catch (Exception e) {
+            return Map.of();
+        }
+    }
+
+    /** Tolerant scalar-long read (last-event ts): missing/failed → 0 (no history). */
+    private static long tolerantLong(RedisFuture<String> f) {
+        if (f == null) {
+            return 0L;
+        }
+        try {
+            String v = f.get(AWAIT_MS, TimeUnit.MILLISECONDS);
+            return v == null ? 0L : Long.parseLong(v);
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
+
+    /** Tolerant list read: a missing key (new entity) or a failed read → no history. */
+    private static List<String> tolerantList(RedisFuture<List<String>> f) {
+        if (f == null) {
+            return List.of();
+        }
+        try {
+            List<String> v = f.get(AWAIT_MS, TimeUnit.MILLISECONDS);
             return v == null ? List.of() : v;
         } catch (Exception e) {
             return List.of();

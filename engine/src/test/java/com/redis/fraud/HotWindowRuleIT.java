@@ -3,7 +3,6 @@ package com.redis.fraud;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.redis.fraud.signal.SignalKeys;
-import com.redis.fraud.signal.SignalTimeSeries;
 import com.redis.fraud.testsupport.RedisFixtureLoader;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
@@ -84,28 +83,26 @@ class HotWindowRuleIT extends AbstractTwoRedisIT {
         // Control: a clean history — one beneficiary, no declines.
         sig.pfadd(SignalKeys.benesMonth(CID_CLEAN, REF), "bene_002");
 
-        // R024: a single velocity sample ~90 days ago and nothing since → dormant reactivation.
-        sig.del(SignalKeys.velocityTs(CID_DORMANT));
-        SignalTimeSeries.add(signalConnection.async(), SignalKeys.velocityTs(CID_DORMANT),
-                REF.minus(90, ChronoUnit.DAYS).toEpochMilli(), 1, SignalKeys.TS_RETENTION_MS, "SUM").get();
+        // R024: last transaction ~90 days ago and nothing since → dormant reactivation.
+        sig.del(SignalKeys.lastEventTs(CID_DORMANT));
+        sig.set(SignalKeys.lastEventTs(CID_DORMANT),
+                Long.toString(REF.minus(90, ChronoUnit.DAYS).toEpochMilli()));
 
         // R025 (device) / R026 (payee): a steady baseline (~1 event per 5-min bucket over the
-        // last ~6h) plus a spike of many events in the current 5-min bucket → surge ratio > 5.
-        sig.del(SignalKeys.deviceVelocityTs(DEVICE_SURGE), SignalKeys.beneVelocityTs(BENE_SURGE));
-        seedSurge(SignalKeys.deviceVelocityTs(DEVICE_SURGE));
-        seedSurge(SignalKeys.beneVelocityTs(BENE_SURGE));
+        // last ~5.5h) plus a spike of many events in the current 5-min bucket → surge ratio > 5.
+        sig.del(SignalKeys.deviceSurge5m(DEVICE_SURGE), SignalKeys.beneSurge5m(BENE_SURGE));
+        seedSurge(sig, SignalKeys.deviceSurge5m(DEVICE_SURGE));
+        seedSurge(sig, SignalKeys.beneSurge5m(BENE_SURGE));
     }
 
-    /** 13 baseline buckets (1 event each, spread over ~5.5h) + a 20-event spike in the current 5m bucket. */
-    private void seedSurge(String key) throws Exception {
-        var a = signalConnection.async();
+    /** 13 baseline 5-min buckets (1 event each, 10-min apart) + a 20-event spike in the current bucket. */
+    private void seedSurge(RedisCommands<String, String> sig, String key) {
+        long now = REF.toEpochMilli();
         for (int k = 1; k <= 13; k++) {
-            long ts = REF.minus(26L * k, ChronoUnit.MINUTES).toEpochMilli();
-            SignalTimeSeries.add(a, key, ts, 1, SignalKeys.SURGE_RETENTION_MS, "SUM").get();
+            long bucket = SignalKeys.bucketStart(now - k * 10L * 60 * 1000, SignalKeys.SURGE_BUCKET_MS);
+            sig.hset(key, Long.toString(bucket), "1");
         }
-        for (int i = 0; i < 20; i++) {              // 20 distinct-timestamp events inside the current 5m window
-            SignalTimeSeries.add(a, key, REF.minusSeconds(i).toEpochMilli(), 1, SignalKeys.SURGE_RETENTION_MS, "SUM").get();
-        }
+        sig.hset(key, Long.toString(SignalKeys.bucketStart(now, SignalKeys.SURGE_BUCKET_MS)), "20");
     }
 
     @Test
