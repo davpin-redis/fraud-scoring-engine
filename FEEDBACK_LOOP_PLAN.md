@@ -60,7 +60,7 @@ Legend: **[me]** built/run on the laptop · **[you]** run on GCP · **S/L** smal
 - **Phase 1 — Simulation data:** D1, D2. ✅ **done** (D3 Redis warm-signal seed deferred to Phase 3/4 — the offline core trains on the generated feature Parquet). *(needs A1)*
 - **Phase 2 — Learning core, offline:** B1, B2, B3 + E1, E2. ✅ **done** — deterministic learning curve: feedback model R1→R10 recall 0.76→0.86, FPR down, precision up, PR-AUC 0.67→0.85; beats the blunt baseline on every axis. **Model note:** uses scikit-learn `HistGradientBoostingClassifier` (no OpenMP dep) as the CPU GBT; LightGBM is the documented prod swap once `libomp` is installed. *(needs 0–1)*
 - **Phase 3 — Aggregator + live dashboard:** C1, C2, D4-small. ✅ **done** — aggregator joins `txn:events` + labels into global Redis confusion counters and serves the dashboard over SSE; the orchestrator streams champion(blunt)+challenger(fb) decisions; e2e smoke shows the live inflection (challenger recall 0.63→0.76 on feedback, FPR far below the blunt champion). 20 pipeline tests green.
-- **Phase 4 — Engine-in-the-loop:** B4, B5, B6, E3. ✅ **done** — B4 in-engine ONNX scoring + `model:invalidate` hot-reload; B5 decision bands in `cfg:bands`, hot-reloaded; B6 fast reactive loop (confirmed fraud → `bl:*`, caught live by R001/R002). Engine 50 green; pipeline 24 green. *(Remaining small wiring: feed the orchestrator's fraud labels into `labels:events` with entities so the fast loop grows blacklists during the live demo — needs entity columns loaded in `dataset.holdout`.)*
+- **Phase 4 — Engine-in-the-loop:** B4, B5, B6, E3. ✅ **done** — B4 in-engine ONNX scoring + `model:invalidate` hot-reload; B5 decision bands in `cfg:bands`, hot-reloaded; B6 fast reactive loop (confirmed fraud → `bl:*`, caught live by R001/R002). Engine 50 green; pipeline 27 green. The orchestrator now feeds fraud labels (with entities) into `labels:events`, the fast loop grows `bl:*` live, and a blacklist hard-block overlay (engine R001/R002 semantics) contains repeats — verified e2e (17 mule accounts / 14 farm devices blacklisted from streamed fraud, legit untouched).
 - **Phase 5 — Large scale (GCP):** D3-large, D4-large/Gatling, F1. ← **next** *([you] run)* *(needs 0–4)*
 - **Phase 6 — (deferred) Track B embeddings (GPU).** Out of scope for this demo (§8.4.3).
 
@@ -76,6 +76,7 @@ the GCP scale run.
 docker compose up -d                                   # collapsed Redis on :6379
 ./.venv/bin/python pipeline/generator.py --scale small --out pipeline/data/sim/small
 ./.venv/bin/python -m uvicorn --app-dir pipeline aggregator:create_app --factory --port 8090 &
+./.venv/bin/python pipeline/fast_loop.py &             # reactive blacklisting from confirmed fraud
 ./.venv/bin/python pipeline/orchestrator.py --sim pipeline/data/sim/small --tps 400 &
 open http://localhost:8090/                            # dashboard (live SSE), click "Apply feedback"
 ```

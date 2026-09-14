@@ -24,7 +24,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 import aggregator as agg
 import dataset
-from common import LABEL_KEY_PREFIX, TXN_STREAM, redis_client
+import fast_loop as fl
+from common import LABEL_KEY_PREFIX, LABELS_STREAM, TXN_STREAM, redis_client
+from labels import CONFIRMED_FRAUD, CONFIRMED_LEGIT
 from model import predict, train
 
 BUDGET = 0.02
@@ -41,6 +43,7 @@ def _train_challenger(sim_dir, upto_round, Xh, seed=0):
 
 def setup(r, sim_dir, initial_round=1):
     Xh, yh, amh = dataset.holdout(sim_dir)
+    ent = dataset.holdout_entities(sim_dir)
     dev = Xh[:, dataset.FEATURES.index("device_distinct_customers")]
     r.set(agg.CHAMPION_KEY, CHAMP_VER)
     r.set(agg.CHALLENGER_KEY, CHALL_VER)
@@ -49,7 +52,17 @@ def setup(r, sim_dir, initial_round=1):
     r.sadd(agg.INSTANCES_KEY, inst)
     model, thr = _train_challenger(sim_dir, initial_round, Xh)
     return dict(sim_dir=sim_dir, Xh=Xh, yh=yh, amh=amh, dev=dev,
+                recv=ent["receiver_account"], devfp=ent["device_fingerprint"],
                 model=model, thr=thr, promoted=False, rng=np.random.default_rng(0))
+
+
+def apply_blacklist(decision, receiver, device, bl_accts, bl_devs):
+    """Hard-block overlay simulating engine rules R001/R002: a blacklisted payee or device
+    is declined regardless of the model/rule score. This is how the fast loop's newly-listed
+    entities contain repeat offenders live."""
+    if receiver in bl_accts or device in bl_devs:
+        return "decline"
+    return decision
 
 
 def maybe_promote(r, st, promoted_round=10):
@@ -62,14 +75,28 @@ def maybe_promote(r, st, promoted_round=10):
 def one_tick(r, st, batch=200):
     idx = st["rng"].integers(0, len(st["yh"]), batch)
     scores = predict(st["model"], st["Xh"][idx])
+    # snapshot the (small) blacklists once per tick; the fast loop grows them out of band
+    bl_accts = r.smembers(fl.BL_ACCOUNTS)
+    bl_devs = r.smembers(fl.BL_DEVICES)
     pipe = r.pipeline()
     for j, i in enumerate(idx):
         tid = f"live_{uuid.uuid4().hex[:12]}"
+        is_fraud = st["yh"][i] == 1
+        recv, device = st["recv"][i], st["devfp"][i]
         pipe.set(LABEL_KEY_PREFIX + tid, json.dumps(
-            {"transaction_id": tid, "label": "confirmed_fraud" if st["yh"][i] == 1 else "confirmed_legit"}))
+            {"transaction_id": tid, "label": CONFIRMED_FRAUD if is_fraud else CONFIRMED_LEGIT}))
+        # feed the fast loop: confirmed fraud + implicated entities -> labels:events
+        if is_fraud:
+            pipe.xadd(LABELS_STREAM, {"v": json.dumps(
+                {"transaction_id": tid, "label": CONFIRMED_FRAUD, "source": "simulation",
+                 "receiver_account": recv, "device_fingerprint": device})},
+                maxlen=200_000, approximate=True)
         amt = float(st["amh"][i])
         champ = "decline" if st["dev"][i] > 2 else "approve"          # blunt rule
         chall = agg.decision_at(float(scores[j]), st["thr"])          # feedback model @ fixed budget
+        # engine rules R001/R002 (blacklist) apply to both paths
+        champ = apply_blacklist(champ, recv, device, bl_accts, bl_devs)
+        chall = apply_blacklist(chall, recv, device, bl_accts, bl_devs)
         for ver, dec in ((CHAMP_VER, champ), (CHALL_VER, chall)):
             pipe.xadd(TXN_STREAM, {"v": json.dumps(
                 {"transaction_id": tid, "model_version": ver, "decision": dec, "amount_base": amt})},

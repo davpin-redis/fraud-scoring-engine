@@ -26,6 +26,19 @@ def _load(path: str):
     return X, y, amount
 
 
+ENTITY_COLS = ("customer_id", "receiver_account", "device_fingerprint")
+
+
+def load_entities(path: str) -> dict:
+    """Entity id columns aligned row-for-row with _load() (same file, same order)."""
+    t = pq.read_table(path)
+    return {c: t.column(c).to_pylist() for c in ENTITY_COLS}
+
+
+def holdout_entities(sim_dir: str) -> dict:
+    return load_entities(os.path.join(sim_dir, "holdout.parquet"))
+
+
 def warmup(sim_dir: str):
     return _load(os.path.join(sim_dir, "warmup.parquet"))
 
