@@ -367,6 +367,19 @@ equivalents are proven in CI (`pipeline/` + engine tests); this is the distribut
 **Collapsed store:** feature + signal stores are one Redis (design doc §13.6.6) — point
 both `fraud.feature-store.uri` and `fraud.signal-store.uri` at it.
 
+### 0. Prerequisites & vars (feedback-loop run)
+```
+STORE=<collapsed Redis endpoint host>       # one cluster; see "Redis cluster sizing" below
+LB_VIP=<internal L4 LB VIP>                 # fronts the engines (§6)
+DATA=/data/parquet                          # shared path (Filestore mount) OR a gs:// bucket
+MODELS=/models                              # shared path engines read fraud.model.path from
+```
+- Pipeline VM: `pip install -r pipeline/requirements.txt` (redis, pyarrow, scikit-learn, duckdb, fastapi/uvicorn).
+- Shared storage for `$DATA` / `$MODELS` — see "Shared storage" below (GCS bucket recommended;
+  Filestore if you want a plain POSIX mount).
+- The audit sink writes the `txn:events` stream in the collapsed store; the Parquet writer
+  drains it to `$DATA` (system of record); DuckDB in `retrain_loop` reads it back.
+
 ### 1. Seed (D3-large)
 ```bash
 # reference data + cfg (rules incl. the blunt device rule + cfg:bands) into the one store
@@ -410,6 +423,42 @@ Open `http://<pipeline-vm>:8090/` — recall / FPR / precision **aggregated acro
 (from the shared stream + Redis counters, not per-instance actuators). As `retrain_loop`
 ships a better ONNX (or you click **Apply feedback**), recall steps up and FPR steps down at
 the marker; `SCARD bl:accounts` grows as the fast loop contains rings.
+
+### Compute (feedback-loop run)
+| Component | VM | Count |
+|---|---|---|
+| Scoring engines | `e2-standard-8` (`-Xmx4g`) | 3 (→5 for 3–5k burst) |
+| Pipeline services (Parquet writer×2–4, aggregator+dashboard, fast loop, chargeback feed) | `e2-standard-8` | 1 |
+| retrain_loop | `e2-standard-8` (or share pipeline VM) | 1 |
+| Gatling driver | `e2-standard-8` | 1 |
+| Seeder VMs (one-off, then release) | `e2-standard-16` | 4 |
+
+### Redis cluster sizing (collapsed store, 5M / 1,000 tx/s)
+Capacity (90-day history): feature ~120 GB + signal <20 GB + cached decisions ~13 GB
+(24 h TTL) + streams/labels/metrics/bl/cfg ~3–5 GB ≈ **~155 GB raw** → **~195 GB** with
+~25% overhead → **provision ~300 GB usable** (keep util < ~65%).
+
+- **Shards:** **12 primaries** (~16 GB each — under the ~25 GB/shard ceiling). Throughput is
+  ~75–110K ops/s (≤250K burst) — trivially served; this is **memory-bound**, so capacity drives
+  the shard count, not ops.
+- **Nodes — no-HA (demo):** **3 × `n2d-highmem-16`** (128 GB → 384 GB) at ~50% util.
+- **Nodes — HA (replica ×2):** **6 × `n2d-highmem-16`** across 3 AZs (12 primary + 12 replica).
+- **Lever:** seed `--days 30` → feature ~55 GB (total ~90 GB raw), fits **3 × `n2d-highmem-8`**
+  (192 GB) no-HA. `--days 7` smaller still. Full 90d isn't needed for a few-hours feedback demo.
+
+*(Production may split back into two clusters per §7.12; this run collapses them.)*
+
+### Shared storage
+Three things are shared: the **Parquet system-of-record** (writer→retrain/analytics), the
+**labels Parquet**, and the **ONNX model** (retrain→every engine).
+- **Recommended — GCS bucket** for `$DATA` (transactions + labels): the Parquet writer / DuckDB
+  read+write `gs://…` directly (pyarrow + gcsfs / DuckDB httpfs) — durable, cheap, no mount.
+- **Model artifact — GCS + fetch-on-`model:invalidate`:** publish `gs://…/fraud-model.onnx`(+manifest);
+  each engine, on the Pub/Sub message, downloads to a local `$MODELS` path then `reload()`s
+  (strongly consistent per fetch, avoids NFS). This small fetch step is the one remaining code
+  hook; without it, use a **Filestore** (managed NFS) mounted read-only on engines as `$MODELS`.
+- **Simplest single POSIX path:** one **Filestore** (e.g. 1 TB SSD) mounted on all VMs as `$DATA`
+  + `$MODELS` — zero glue, pricier, single-region. Do **not** use multi-attach Persistent Disk.
 
 ### Sizing (added components, on top of §Sizing)
 | Component | Guidance |
