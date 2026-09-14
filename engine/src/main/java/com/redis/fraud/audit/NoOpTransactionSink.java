@@ -3,6 +3,7 @@ package com.redis.fraud.audit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
  * (capped Redis Stream, Kafka, warehouse) — callers are unaffected.
  */
 @Component
+@ConditionalOnProperty(name = "fraud.audit-sink.type", havingValue = "noop")
 public class NoOpTransactionSink implements TransactionSink {
 
     private static final Logger log = LoggerFactory.getLogger(NoOpTransactionSink.class);
