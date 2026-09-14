@@ -1,5 +1,6 @@
 package com.redis.fraud.config;
 
+import com.redis.fraud.scoring.DecisionBander;
 import tools.jackson.databind.ObjectMapper;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
@@ -24,7 +25,10 @@ public class RedisConfigStore {
     static final String KEY_WINDOWS = "cfg:windows";
     static final String KEY_METRICS = "cfg:metrics";
     static final String KEY_RULES = "cfg:rules";
+    static final String KEY_BANDS = "cfg:bands";        // decision-band thresholds (§8.3, hot-reloadable)
     public static final String INVALIDATION_CHANNEL = "cfg:invalidate";
+    static final double DEFAULT_REVIEW = 0.30;
+    static final double DEFAULT_DECLINE = 0.70;
 
     private final StatefulRedisConnection<String, String> connection;
     private final ObjectMapper mapper;
@@ -32,6 +36,7 @@ public class RedisConfigStore {
     private volatile Map<String, WindowDef> windows;
     private volatile Map<String, MetricDef> metrics;
     private volatile Map<String, RuleDef> rules;
+    private volatile DecisionBander bands;
 
     public RedisConfigStore(StatefulRedisConnection<String, String> connection, ObjectMapper mapper) {
         this.connection = connection;
@@ -50,8 +55,15 @@ public class RedisConfigStore {
         this.windows = parse(sync.hgetall(KEY_WINDOWS), WindowDef.class);
         this.metrics = parse(sync.hgetall(KEY_METRICS), MetricDef.class);
         this.rules = parse(sync.hgetall(KEY_RULES), RuleDef.class);
-        log.info("Loaded config: {} windows, {} metrics, {} rules",
-                windows.size(), metrics.size(), rules.size());
+        this.bands = loadBands(sync.hgetall(KEY_BANDS));
+        log.info("Loaded config: {} windows, {} metrics, {} rules, bands review={} decline={}",
+                windows.size(), metrics.size(), rules.size(), bands.reviewThreshold(), bands.declineThreshold());
+    }
+
+    private DecisionBander loadBands(Map<String, String> raw) {
+        double review = raw.containsKey("review") ? Double.parseDouble(raw.get("review")) : DEFAULT_REVIEW;
+        double decline = raw.containsKey("decline") ? Double.parseDouble(raw.get("decline")) : DEFAULT_DECLINE;
+        return new DecisionBander(review, decline);
     }
 
     /** Invoked when a Pub/Sub invalidation message is received (§7.2). */
@@ -70,6 +82,12 @@ public class RedisConfigStore {
             }
         });
         return out;
+    }
+
+    /** Current decision-band thresholds (§8.3), hot-reloaded via {@code cfg:invalidate}. */
+    public DecisionBander bands() {
+        ensureLoaded();
+        return bands;
     }
 
     public Map<String, WindowDef> windows() {

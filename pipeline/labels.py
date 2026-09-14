@@ -27,14 +27,18 @@ CONFIRMED_FRAUD = "confirmed_fraud"
 CONFIRMED_LEGIT = "confirmed_legit"
 
 
-def label_record(txn_id: str, label: str, source: str, txn_ts_ms: int, labeled_at_ms: int | None = None) -> dict:
-    """Build a normalised label record."""
+def label_record(txn_id: str, label: str, source: str, txn_ts_ms: int, labeled_at_ms: int | None = None,
+                 receiver_account: str | None = None, device_fingerprint: str | None = None) -> dict:
+    """Build a normalised label record. The (optional) entities let the fast reactive loop
+    (§8.4.2) blacklist the implicated payee/device on a confirmed fraud."""
     return {
         "transaction_id": txn_id,
         "label": label,
         "source": source,
         "labeled_at_ms": int(labeled_at_ms if labeled_at_ms is not None else time.time() * 1000),
         "txn_ts_ms": int(txn_ts_ms),
+        "receiver_account": receiver_account,
+        "device_fingerprint": device_fingerprint,
     }
 
 
@@ -59,9 +63,11 @@ def matured(records: list[dict], now_ms: int, maturation_ms: int) -> list[dict]:
 
 # --- runtime I/O ---
 
-def submit_label(r, txn_id: str, label: str, source: str, txn_ts_ms: int, labeled_at_ms: int | None = None) -> dict:
+def submit_label(r, txn_id: str, label: str, source: str, txn_ts_ms: int, labeled_at_ms: int | None = None,
+                 receiver_account: str | None = None, device_fingerprint: str | None = None) -> dict:
     """Write the online copy (Redis) for the fast loop + aggregator. Returns the record."""
-    rec = label_record(txn_id, label, source, txn_ts_ms, labeled_at_ms)
+    rec = label_record(txn_id, label, source, txn_ts_ms, labeled_at_ms,
+                       receiver_account=receiver_account, device_fingerprint=device_fingerprint)
     r.set(LABEL_KEY_PREFIX + txn_id, json.dumps(rec))
     r.xadd(LABELS_STREAM, {"v": json.dumps(rec)})
     return rec

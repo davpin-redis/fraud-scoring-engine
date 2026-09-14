@@ -1,7 +1,9 @@
 package com.redis.fraud.scoring;
 
+import com.redis.fraud.config.RedisConfigStore;
 import com.redis.fraud.feature.FeatureVector;
 import com.redis.fraud.rules.RuleOutcome;
+import java.util.function.Supplier;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -26,23 +28,28 @@ import org.springframework.stereotype.Service;
 public class ScoringService {
 
     static final String RULES_VERSION = "rules-v1";
-    private static final double REVIEW_THRESHOLD = 0.30;
-    private static final double DECLINE_THRESHOLD = 0.70;
+    private static final DecisionBander DEFAULT_BANDER = new DecisionBander(0.30, 0.70);
 
-    private final DecisionBander bander = new DecisionBander(REVIEW_THRESHOLD, DECLINE_THRESHOLD);
     private final ModelScorer model; // null when fraud.model.enabled=false
+    private final Supplier<DecisionBander> banderSupplier; // config-driven bands (§8.3, hot-reloadable)
 
     public ScoringService() {
-        this.model = null;
+        this(null, () -> DEFAULT_BANDER);
     }
 
     public ScoringService(ModelScorer model) {
+        this(model, () -> DEFAULT_BANDER);
+    }
+
+    ScoringService(ModelScorer model, Supplier<DecisionBander> banderSupplier) {
         this.model = model;
+        this.banderSupplier = banderSupplier;
     }
 
     @Autowired
-    public ScoringService(ObjectProvider<ModelScorer> modelProvider) {
+    public ScoringService(ObjectProvider<ModelScorer> modelProvider, RedisConfigStore configStore) {
         this.model = modelProvider.getIfAvailable();
+        this.banderSupplier = configStore::bands;   // thresholds from cfg:bands, reloaded on cfg:invalidate
     }
 
     public boolean modelEnabled() {
@@ -76,7 +83,7 @@ public class ScoringService {
             modelScore = probability;
             finalScore = Math.max(ruleScore, probability);
         }
-        return new ScoreResult(bander.decide(finalScore), finalScore, modelScore, activeVersion());
+        return new ScoreResult(banderSupplier.get().decide(finalScore), finalScore, modelScore, activeVersion());
     }
 
     private String activeVersion() {
