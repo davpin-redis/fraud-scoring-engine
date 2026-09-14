@@ -59,8 +59,8 @@ Legend: **[me]** built/run on the laptop · **[you]** run on GCP · **S/L** smal
 - **Phase 0 — Foundations:** A1, A2, A3, A4. *Unlocks everything.* ✅ **done** (engine 44 green; pipeline e2e verified)
 - **Phase 1 — Simulation data:** D1, D2. ✅ **done** (D3 Redis warm-signal seed deferred to Phase 3/4 — the offline core trains on the generated feature Parquet). *(needs A1)*
 - **Phase 2 — Learning core, offline:** B1, B2, B3 + E1, E2. ✅ **done** — deterministic learning curve: feedback model R1→R10 recall 0.76→0.86, FPR down, precision up, PR-AUC 0.67→0.85; beats the blunt baseline on every axis. **Model note:** uses scikit-learn `HistGradientBoostingClassifier` (no OpenMP dep) as the CPU GBT; LightGBM is the documented prod swap once `libomp` is installed. *(needs 0–1)*
-- **Phase 3 — Aggregator + live dashboard:** C1, C2, D4-small. ← **next** *(needs 0–2)*
-- **Phase 4 — Engine-in-the-loop:** B4, B5, B6, E3. *(needs 2)*
+- **Phase 3 — Aggregator + live dashboard:** C1, C2, D4-small. ✅ **done** — aggregator joins `txn:events` + labels into global Redis confusion counters and serves the dashboard over SSE; the orchestrator streams champion(blunt)+challenger(fb) decisions; e2e smoke shows the live inflection (challenger recall 0.63→0.76 on feedback, FPR far below the blunt champion). 20 pipeline tests green.
+- **Phase 4 — Engine-in-the-loop:** B4, B5, B6, E3. ← **next** *(needs 2)*
 - **Phase 5 — Large scale (GCP):** D3-large, D4-large/Gatling, F1. *([you] run)* *(needs 0–4)*
 - **Phase 6 — (deferred) Track B embeddings (GPU).** Out of scope for this demo (§8.4.3).
 
@@ -69,6 +69,20 @@ learning-curve test + live dashboard); Phase 4 makes it engine-live; Phase 5 is
 the GCP scale run.
 
 ---
+
+## Run the live small-scale demo (Phase 3)
+
+```bash
+docker compose up -d                                   # collapsed Redis on :6379
+./.venv/bin/python pipeline/generator.py --scale small --out pipeline/data/sim/small
+./.venv/bin/python -m uvicorn --app-dir pipeline aggregator:create_app --factory --port 8090 &
+./.venv/bin/python pipeline/orchestrator.py --sim pipeline/data/sim/small --tps 400 &
+open http://localhost:8090/                            # dashboard (live SSE), click "Apply feedback"
+```
+
+The dashboard is the same `feedback_dashboard_mockup.html`, served by the aggregator with
+`USE_SIMULATION=false` so it reads the real SSE feed. "Apply feedback" promotes the
+challenger; recall steps up and FPR steps down at the marker.
 
 ## Layout (new)
 
