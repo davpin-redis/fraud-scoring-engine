@@ -588,12 +588,65 @@ The Decision Engine combines rule outcomes and the model score into a single fin
 
 ### 8.4 Feedback Loop
 
+The system improves over time by turning outcomes back into better decisions. This is
+organised as **two tracks** on a shared data foundation: a near-term **closed-loop feedback**
+track (Track A) that retrains a lightweight classifier and reacts to confirmed fraud, and a
+strategic **learned event-sequence representation** track (Track B) that adds a self-supervised
+embedding of each user's history. Track A is CPU-only and is the prerequisite; Track B is a
+GPU-dependent upgrade layered on the same foundation.
+
 Ground-truth labels arrive after the fact, from two main sources:
 
-- **Chargebacks** — arrive from the payment processor, typically 1–90+ days after the transaction; a strong but delayed and imperfect fraud signal (chargebacks also occur for non-fraud disputes).
-- **Manual review outcomes** — analysts reviewing "review"-bucket transactions produce a faster, more direct fraud/not-fraud label, usually within hours to days.
+- **Chargebacks** — from the payment processor, typically 1–90+ days after the transaction; strong but delayed and imperfect (chargebacks also occur for non-fraud disputes).
+- **Manual review outcomes** — analysts reviewing "review"-bucket transactions give a faster, more direct label, usually within hours to days.
 
-Labels are attached to the original transaction record (see `outcome_label` field, §4.2). The training pipeline runs on a regular cadence (e.g., weekly) to incorporate newly labeled data, evaluate the candidate model against the current production model on a held-out set, and promote it if it improves target metrics without regressing others.
+Crucially, **some transactions the engine *approved* are later confirmed fraudulent** — these false negatives are the highest-value training signal, and catching their repeats is where most near-term loss reduction comes from.
+
+#### 8.4.1 Data foundation — event transport and durable history
+
+- **Event transport (bounded):** each scored transaction is appended to a **Redis Stream** (`XADD txn:events * …`) trimmed with **`MAXLEN ~ <N>`** (or by `MINID` to a few hours). The stream is a **buffered pipe, never the archive** — its RAM stays flat regardless of volume. Consumers read via **consumer groups** (`XREADGROUP`+`XACK`), each group seeing every event and load-balancing across its own members; entries are trimmed only once durably persisted downstream. The engine's feature-store and signal-store writes are **not** stream consumers — they remain the engine's direct off-path writes; the `XADD` is the third off-path write, carrying only the scored-transaction event.
+  - **Near-term (Track A only) there is exactly one consumer group: the Parquet writer.** Track A's trainer reads Parquet *offline*, not the stream. The **embedding service (Track B) is the second consumer group**, added later.
+- **Labels are a separate ingress, not this stream.** Chargeback / manual-review outcomes arrive on their own path and land in the label store keyed by `transaction_id`; the `txn:events` stream carries only the scored events.
+- **Durable history (system of record):** the `TransactionSink` (§4.3, currently `NoOpTransactionSink`) writes the full record — including the point-in-time `featureSnapshotJson` — to **date-partitioned Parquet** (swappable for a warehouse). This, not Redis, holds the complete transaction history used for training and audit. **Single writer, many readers:** only the Parquet writer *writes* (avoids concurrent-write/compaction coordination); the Track A trainer, the eval/backtest harness, the Track B embedding backfill, and analytics all *read* the shared store.
+- **Label store:** confirmed outcomes are attached to the original record by `transaction_id` (`label`, `source`, `labeled_at`), with a **maturation window** (e.g. 60–90 days) before an un-charged-back transaction is treated as `confirmed_legit`, so recent transactions are never labelled legit prematurely.
+
+#### 8.4.2 Track A — Closed-loop feedback (near-term, CPU-only)
+
+Two speeds:
+
+- **Fast loop (seconds–minutes) — reactive containment.** On a confirmed fraud, immediately push the implicated entities (beneficiary account, device, TPP) to `bl:accounts`/`bl:devices`/watchlist and bump signal counters, then fire `cfg:invalidate` (§7.2) so every engine catches repeats of the same ring on the next transaction — **no retrain**, reusing R001/R002/R008. Guard auto-actions with confidence thresholds, magnitude caps, and expiry to resist poisoning.
+- **Slow loop (daily/weekly) — statistical learning.** Join matured labels to the **point-in-time feature snapshots** and retrain a **CPU gradient-boosted model** (LightGBM/XGBoost) or the existing logistic `LinearModelScorer`, behind the existing `ModelScorer` interface. Promote via champion/challenger (§8.4.4). Decision-band thresholds are re-calibrated against the £-cost target on the same cadence (move the bands into `cfg` so they hot-reload like rules).
+
+No foundation model is required for this track — training on the persisted engineered feature vector is fast on CPU and keeps the demonstrated variable (the feedback loop) uncoupled from any heavy new representation.
+
+#### 8.4.3 Track B — Learned event-sequence representation (strategic, GPU-dependent)
+
+A **separate embedding service** (bounded context; not in the JVM engine) consumes the `txn:events` stream, encodes each user's recent event history with a self-supervised **PRAGMA-style encoder** (masked-modelling, key–value–time tokenisation), and writes a **cached per-user embedding** `emb:{cid}` (a versioned vector) into the signal store. The engine reads that vector on the hot path with a plain `GET` and feeds `concat(engineered signals, embedding)` to the in-engine head — it **never calls the embedding service inline** and degrades to engineered signals if the vector is missing/stale (the PRAGMA staleness result, arXiv 2604.08649 §3.4.2, shows slight staleness costs <0.2% precision/recall).
+
+- **Scaling the embedding service** (it is the heavy component, but off the hot path with a seconds-scale budget):
+  - **Debounce/coalesce — the biggest lever:** recompute a user at most every *K* events or *N* minutes (a per-user "last-embedded" marker / dirty-set), so a burst for one hot user collapses into a single recompute and effective embedding QPS is far below the 1,000 tx/s ingest rate.
+  - **Horizontal replicas** in the consumer group (Redis load-balances entries across members); **shard by `cid`** so one user's recomputes serialise on one worker (no racy double-writes to `emb:{cid}`, better cache locality).
+  - **Batch inference** (Triton dynamic batching / app-level micro-batching) and **cap sequence length** (PRAGMA subsamples >6,500 events, keeps most recent) to bound per-inference cost.
+  - **Prioritise & shed:** embed active/high-risk users first; let dormant users' vectors age (staleness tolerated). If the service falls behind, the bounded stream + debounce shed redundant work and embeddings just get staler — the engine degrades gracefully.
+  - **Separate the one-off backfill** (embed all users from Parquet) from the steady online updater; scale them independently.
+- **CPU-only feasibility — separate *serving* from *pre-training*:**
+  - **Serving on CPU: yes.** `pragmatiq` is CPU-first for inference; a small model (nano/S) + ONNX/int8 + debounce + batching serves fine on CPU. LoRA fine-tuning and the linear/embedding-probe head are also CPU-friendly.
+  - **Pre-training on CPU: PoC only.** `pragmatiq` ships **no pretrained weights** and its schema differs from ours, so the backbone must be pre-trained at least once; the from-scratch MLM step is the one GPU-hungry part. On CPU you can pre-train a **nano preset on a reduced corpus** (hours–days) to demonstrate the mechanism, but production-grade embeddings and periodic drift re-pre-training want GPUs.
+- **Train once, reuse many (demo model artifact):** pre-training is a **one-off offline step**, not part of any demo run. Train the backbone once and persist a **versioned artifact** — backbone checkpoint (+ ONNX/quantized export), tokeniser/vocab + feature-encoding config, and a version tag — in a model registry / object store (not committed to git as a large binary). Every demo *loads* that artifact; it never re-pre-trains. **Freeze the backbone, vary the head:** the label-free backbone is task-agnostic and reused across all demos, while the cheap classifier head is what the feedback loop retrains (seconds–minutes on CPU) to show the before/after lift. Because embeddings depend only on the frozen backbone + user history, **precompute `emb:{cid}` for the demo cohort once** and cache the vectors — a demo then starts instantly (load head, read cached embeddings, run the feedback step) and is deterministic (pin artifact version, fix seeds, snapshot the dataset). Only a backbone **re-pre-train** invalidates the cache (version bump + re-embed) — deliberately out of scope for demos.
+- **Versioning (critical):** embeddings are meaningless across backbone versions. Couple `(backbone, head)` versions atomically, stamp the version on each `emb:{cid}` vector, run a re-embed/backfill on backbone change, and have the engine check version compatibility.
+
+#### 8.4.4 Demonstrating that the loop increases fraud detection *and* reduces false positives
+
+**Key constraint:** recall and precision cannot both rise by re-thresholding — that is a pure trade-off. They improve **together only if the feedback improves *discrimination*** (pushes the PR/ROC curve outward), i.e. the loop teaches the model something it did not previously know. A convincing test therefore requires:
+
+1. **An actuator** — the loop must change a decision surface (retrain the head, add a signal, adjust weights/thresholds, or blacklist), not merely accumulate labels.
+2. **A frozen champion vs a post-feedback challenger**, scored on the **same temporally-later holdout**, compared at a **fixed operating point** (recall @ fixed decline-rate; precision @ fixed recall) plus PR-AUC and the £-view (fraud £ caught vs false-decline £).
+3. **Point-in-time features + matured labels** (no leakage; train past → test future, never shuffle).
+4. **A scenario engineered so both *can* improve:** a fraud modus operandi the baseline both *misses* (false negatives) and only catches via a **blunt rule that also false-positives on look-alike legit** (e.g. a mule/device-farm pattern where the baseline leans on a crude `device_distinct_customers > 2` that also flags shared family devices). After feedback teaches the sharper combination (device fan-out × new-payee × velocity/surge), the challenger catches the missed mules (**recall ↑**) *and* the crude rule can be relaxed so the look-alike legit clear (**false positives ↓**).
+5. **Sufficient labelled volume** of that pattern, both classes, with imbalance handling.
+6. **Selective-labelling honesty:** labels exist only for *approved* transactions, so anchor the demo on the **approved-but-fraud → caught-next-time** story (unbiased for that pattern); an **exploration slice** (a small, risk-capped random pass-through of would-be-declines) is what de-biases the declined side in production.
+
+Every automated decision must remain explainable and auditable (§9): keep a versioned model registry, stamp `modelVersion` on every record (already done), and gate model/threshold promotion behind approval.
 
 ---
 
@@ -627,6 +680,20 @@ Labels are attached to the original transaction record (see `outcome_label` fiel
 - False-positive rate (legitimate transactions declined) — tracked as a business cost (lost revenue, customer friction), not just a model metric.
 - Fraud loss rate (confirmed fraud that was approved) — the primary business cost the system exists to reduce.
 - Per-rule fire rate and precision, to identify stale or noisy rules.
+
+### 10.3 Real-time Feedback Dashboard
+
+A live view of the continuous-learning effect (§8.4) — **fraud detection going up and false positives going down** as the feedback loop is applied. Its defining requirement is that the figures are **aggregated across every engine instance**, not read per-instance from `/actuator`.
+
+**Why not sum the actuator endpoints.** The engine's Micrometer/`/actuator/prometheus` counters are per-instance and reset on restart; instances autoscale in and out. Summing them in the UI is fragile, and more fundamentally the actuator only knows each instance's *decisions*, not whether they were *correct* — recall/precision/FP-rate need labels, which resolve out-of-band (§8.4.1).
+
+**Cross-instance aggregation (Redis-backed).** Every engine appends its decision to the shared `txn:events` Redis Stream (§8.4.1). A small **metrics aggregator** joins those decisions with the label store and maintains **global confusion counters in Redis** — `metrics:{modelVersion}:{minute}` → `tp/fp/fn/tn` — from which it derives recall, precision, FP-rate, and the £ view (fraud £ caught vs false-decline £). Because all engines write to one stream and the counters live in one Redis, the numbers are cluster-wide by construction and survive restarts/autoscaling. The aggregator exposes an SSE endpoint (`/metrics/fraud/stream`, ~1 s frames) that the dashboard consumes; it is stateless (reads the shared counters). *(Production-ops alternative: Prometheus scrapes all instances + Grafana — but recall/precision still need a labelled-outcome exporter fed from this same eval layer.)*
+
+**What it shows.** Headline tiles for **fraud detection rate (recall)** and **false-positive rate** with deltas; two live time-series (challenger solid vs champion dashed) with a **"feedback applied" annotation** at the moment a challenger is promoted / rules are reloaded (`cfg:invalidate`) — the inflection where recall steps up and FP-rate steps down is the headline of the demo. A **champion-vs-challenger operating-point** panel shows both metrics improving on the *same* labelled holdout, which is what makes the claim credible (both improve only via better *discrimination*, not re-thresholding — §8.4.4). Throughput and the contributing-instance count convey the cross-instance aggregation.
+
+**Label-latency caveat.** Recall/precision/FP-rate are exact in real time only because the test supplies labels immediately (seeded scenario + approved-but-fraud marks). In production these lag (chargebacks days later), so the same panels show a *maturing* metric; the review-queue labels give a faster proxy.
+
+**Reference build.** `feedback_dashboard_mockup.html` is a self-contained, Redis-themed page (SSE ~1 s) that ships against a **simulated feed** (`USE_SIMULATION=true`) so the UI and wiring are ready before Track A's label pipeline lands; flip the flag to consume the real aggregator's SSE. It reuses the theme and structure of the load-test dashboard (§13.5) but is a distinct view (fraud *quality* over time, not load-test throughput/latency).
 
 ---
 
@@ -737,3 +804,66 @@ A live view is needed while a test is running — not just the static HTML repor
 - **Scope:** this view is specific to an active test run in the dedicated test environment (§13.4); it is not the production monitoring dashboard (§10), though it deliberately reuses the same metric definitions so a number that looks fine in testing means the same thing in production.
 
 A working mockup of this dashboard, with simulated live data matching the fields above, is in [`load_test_dashboard_mockup.html`](load_test_dashboard_mockup.html) — a self-contained HTML file (open it in any browser; the Redis UI theme and fonts are inlined). It drives every displayed field from a 1s live simulation and exposes the five §13.3 scenarios as tabs; the p99 readout and its chart line turn Hyper Red when latency crosses the 30 ms target, which the burst and failure-injection scenarios exercise.
+
+### 13.6 Simulation & Feedback-Loop Test Data (two scales)
+
+The continuous-learning work (§8.4) must be *demonstrated*, not asserted — a run where **fraud detection rises and false positives fall the longer it runs** (§10.3 dashboard). That requires purpose-built simulation data. The design uses **one parameterised generator with two presets**, so the small set is a faithful scale-down of the large one and a green small-scale result predicts large-scale behaviour:
+
+- **Small (laptop / CI):** fast, deterministic, single Redis container; drives correctness and an automated **learning-curve assertion**.
+- **Large (distributed):** the usual **5M customers / 1,000 tx/s** on GCP; drives the scale/perf validation and the **live cross-instance dashboard demo**.
+
+#### 13.6.1 Why it improves over time (and the honesty constraint)
+
+Improvement is driven by two independent engines, and the data must feed both:
+
+1. **A statistical learning curve (the model).** Fraud is rare, so the classifier under-detects early; as matured labels (§8.4.1) accrue each round the minority class is better estimated → recall and precision rise and plateau. Real and well-understood *provided the fraud signature is learnable from the features and stationary across the run*.
+2. **Deterministic containment (the fast loop, §8.4.2).** Confirmed-fraud entities (mule beneficiary, farm device) are blacklisted; because the simulated fraud **reuses entities across rounds** (rings), every newly-confirmed entity is caught thereafter — a monotonic boost independent of the model.
+
+**Non-negotiable constraint:** recall and precision rise *together* only if discrimination improves (§8.4.4), so the data must contain **look-alike legit** that a blunt baseline rule false-positives on, and the fraud must carry a **joint (multi-feature) signature** the model learns to separate from them. Without look-alikes the run can only trade recall for precision.
+
+#### 13.6.2 The two presets
+
+| Dimension | Small (laptop / CI) | Large (distributed, prod-scale) |
+|---|---|---|
+| Customers | ~5,000 | 5,000,000 |
+| Beneficiaries (incl. mules) | ~1,000 (50 mules) | ~1,000,000 (~20k mules) |
+| Devices (incl. farm) | ~4,000 (15 farm) | ~7,500,000 (few-thousand farm) |
+| Warm-start backfill | ~30d, ~150k txns | ~90d (via the parallel seeders) |
+| Streaming demo | K=10 rounds × ~10k txns, ~1% fraud | 1,000 tx/s sustained (~10 fraud/s); rounds = wall-clock retrain windows (~10–15 min) |
+| Ring entity reuse | across rounds (15 farm / 50 mules) | across the run |
+| Label maturation lag | 1 round | compressed (minutes) |
+| Fixed labelled holdout | ~20k txns (~200 fraud) | ~200k–1M txns |
+| Redis | one `redis:8` container (collapsed) | one Redis cluster (collapsed from two) |
+| Seeding | direct Python script | parallel seeders (`seed_*`) into the single store, extended for mules/farm/look-alikes |
+| Engines / driver | 1 local / in-process script | N instances + aggregator + dashboard / Gatling @ 1,000 tx/s |
+| Validates | correctness + monotonic learning-curve assertion + dashboard vs a real (small) aggregator | scale/perf at prod scale + live cross-instance demo of recall↑ / FP↓ |
+
+#### 13.6.3 Shared invariants
+
+Both presets share the same fraud **joint signature**, **look-alike legit** near the blunt-rule boundary, **class imbalance (~1%)**, **entity reuse** across rounds, **stationary** pattern, **deterministic seed**, the same feature pipeline, and the same **model + evaluation methodology**: a CPU **LightGBM** classifier (Track A) retrained each round on matured labels, champion (frozen round-0) vs challenger (retrained), scored on the **same fixed labelled holdout at a fixed operating point** (e.g. fixed decline budget / fixed FPR), time-ordered split (train past → test future, never shuffle), reported per round as a learning curve. A rolling next-round test is the realistic variant; the fixed holdout is the primary (cleanest) view.
+
+#### 13.6.4 Training-set size is decoupled from population size
+
+At 5M customers the model still trains on a **sampled** labelled set (tens of thousands to a few million rows, including all matured fraud) — never 5M×90d. So retrain stays cheap at both tiers; what actually scales large is **Redis footprint, ingest throughput, and the engine fleet**, not model training. This is why the small tier is a genuine functional proxy for the large one.
+
+#### 13.6.5 Datasets produced (per preset)
+
+1. **Population:** customers, beneficiaries (incl. mules), devices (incl. farm), TPPs, with profiles.
+2. **Warm-start backfill:** legit behavioural traffic + seeded fraud → warms the Redis signals *and* seeds the round-0 training set.
+3. **Streaming demo:** transactions tagged with ground truth (legit, look-alike legit, fraud rings), with entity reuse across rounds.
+4. **Per-round label feed:** matured labels revealed on the maturation lag.
+5. **Fixed labelled holdout:** drawn from the stationary distribution for champion/challenger scoring.
+6. **Config seed:** `cfg:rules`/`cfg:windows`/`cfg:metrics` including the **blunt baseline rule** the model is expected to let us relax, plus decision bands.
+
+Data-generation requirements (enforced as generator self-checks): fraud separable on the *joint* features; look-alikes overlap the *blunt* feature but not the joint one; realistic imbalance; entity reuse; stationarity; seeded RNG for reproducibility.
+
+#### 13.6.6 Single collapsed Redis store
+
+For this work the feature and signal stores are **collapsed into one Redis** (one container small; one cluster large). The key families already carry distinct prefixes (`c:{cid}:…`, `sig:c:{cid}:…`, `sig:dev:{}`, `sig:b:{}`, `bl:*`, `cfg:*`) and per-entity hash tags, so nothing collides — the engine simply points both `fraud.feature-store.uri` and `fraud.signal-store.uri` at the same instance. The seed populates, in that one DB: reference/master data, `cfg:*` (incl. the blunt rule + bands), and the warm 24h-exact aggregates + 90d-approx signals for the seeded population so day-one scoring isn't cold. (Trade-off: feature + signal load now share shards — fine for the demo; the two-cluster split remains the production topology, §7.12.)
+
+#### 13.6.7 Tests
+
+- **Component tests (deterministic, tiny fixtures):** aggregator confusion counters + label-join (known decisions+labels → exact tp/fp/fn/tn and derived recall/precision/FPR); trainer (labelled fixture → model; point-in-time feature assembly with no post-event leakage); eval harness (known confusion → correct recall @ fixed FPR, precision, PR-AUC, £).
+- **Simulation assertion (the "gets better" test), seeded/deterministic, small preset:** run K rounds; at a fixed operating point assert the challenger's **recall increases** round 1→K by ≥ a threshold and is monotonically non-decreasing within tolerance; **FP-rate non-increasing**; challenger **≥ champion every round and strictly better by round K on both axes** on the same holdout. No-leakage (time-split) and both-metrics-improve (discrimination, not threshold) are baked into the assertion shape. A green run here backs the §10.3 dashboard's "apply feedback → recall up, FP down" with a real learning+containment curve rather than a scripted animation.
+
+The large preset reuses the identical generator and assertions; it additionally exercises Redis footprint, 1,000 tx/s ingest, the cross-instance aggregator, and the live dashboard, and is executed on the distributed environment per `LOAD_TEST_RUNBOOK.md`.
