@@ -56,10 +56,10 @@ Legend: **[me]** built/run on the laptop · **[you]** run on GCP · **S/L** smal
 
 ## Phases (dependency-ordered)
 
-- **Phase 0 — Foundations:** A1, A2, A3, A4. *Unlocks everything.* ← **in progress**
-- **Phase 1 — Simulation data:** D1, D2, D3-small. *(needs A1)*
-- **Phase 2 — Learning core, offline:** B1, B2, B3 + E1, E2. *The proof; fully offline.* *(needs 0–1)*
-- **Phase 3 — Aggregator + live dashboard:** C1, C2, D4-small. *(needs 0–2)*
+- **Phase 0 — Foundations:** A1, A2, A3, A4. *Unlocks everything.* ✅ **done** (engine 44 green; pipeline e2e verified)
+- **Phase 1 — Simulation data:** D1, D2. ✅ **done** (D3 Redis warm-signal seed deferred to Phase 3/4 — the offline core trains on the generated feature Parquet). *(needs A1)*
+- **Phase 2 — Learning core, offline:** B1, B2, B3 + E1, E2. ✅ **done** — deterministic learning curve: feedback model R1→R10 recall 0.76→0.86, FPR down, precision up, PR-AUC 0.67→0.85; beats the blunt baseline on every axis. **Model note:** uses scikit-learn `HistGradientBoostingClassifier` (no OpenMP dep) as the CPU GBT; LightGBM is the documented prod swap once `libomp` is installed. *(needs 0–1)*
+- **Phase 3 — Aggregator + live dashboard:** C1, C2, D4-small. ← **next** *(needs 0–2)*
 - **Phase 4 — Engine-in-the-loop:** B4, B5, B6, E3. *(needs 2)*
 - **Phase 5 — Large scale (GCP):** D3-large, D4-large/Gatling, F1. *([you] run)* *(needs 0–4)*
 - **Phase 6 — (deferred) Track B embeddings (GPU).** Out of scope for this demo (§8.4.3).
