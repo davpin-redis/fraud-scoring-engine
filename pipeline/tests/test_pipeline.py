@@ -47,9 +47,20 @@ def test_records_to_table_schema_and_partition_write(tmp_path):
     dt = dt_of(SCORED["timestamp_epoch_ms"])
     part_dir = tmp_path / f"dt={dt}"
     assert part_dir.exists()
+    # one buffered flush -> exactly one file for the partition (not one per record), and no .tmp left
+    files = list(part_dir.glob("*.parquet"))
+    assert len(files) == 1
+    assert not list(part_dir.glob("*.tmp"))
     back = pq.read_table(str(part_dir))
     assert back.num_rows == 3
     assert back.column("transaction_id").to_pylist() == ["t1", "t1", "t1"]
+
+
+def test_should_flush_thresholds():
+    assert pw.should_flush(0, 999, max_rows=100, max_interval_sec=60) is False        # empty never flushes
+    assert pw.should_flush(100, 1, max_rows=100, max_interval_sec=60) is True          # row cap hit
+    assert pw.should_flush(5, 61, max_rows=100, max_interval_sec=60) is True           # aged out (non-empty)
+    assert pw.should_flush(5, 1, max_rows=100, max_interval_sec=60) is False           # below both
 
 
 def test_label_maturation_fraud_immediate_legit_gated():

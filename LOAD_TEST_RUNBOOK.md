@@ -415,10 +415,10 @@ the marker; `SCARD bl:accounts` grows as the fast loop contains rings.
 | Component | Guidance |
 |---|---|
 | Redis Stream `txn:events` | bounded (`MAXLEN ~`), a few hundred MB; transport only — Parquet is the archive |
-| Parquet writer | 1–2 vCPU per consumer; scale the consumer group to keep up with 1–2k events/s (2 per txn: engine emits one; the demo orchestrator two) |
-| Parquet store | ~1–2 KB/txn × retention; on GCS/PD — the durable training corpus |
+| Parquet writer | 1–2 vCPU per consumer; **rolls one large atomic file per partition** every ~200k rows / 60 s (not per batch), so a few-hours run produces ~tens of files, not tens of thousands |
+| Parquet store | ~1–2 KB/txn × retention; on GCS — the durable training corpus. A few-hours run ≈ ~11M rows ≈ a few GB; delete the bucket after the run |
 | Aggregator + dashboard | 1 small VM (rolling Redis counters + SSE); stateless |
-| retrain_loop | 1 VM with a few GB RAM; trains on a **sample** of matured labels (tens of thousands–low millions of rows), minutes per round — independent of the 5M population (§13.6.4). LightGBM here needs `libgomp1`; the default sklearn HGB needs nothing |
+| retrain_loop | 1 VM, a few GB RAM. **Reads via DuckDB** — the label↔snapshot join + maturation filter + 14-feature extraction + reservoir **sample** run in SQL over the Parquet/GCS globs (out-of-core, bounded RAM), returning only the training matrix (default cap 1M rows). Minutes per round, independent of the 5M population (§13.6.4). sklearn HGB needs no native libs; LightGBM would need `libgomp1` |
 | Model artifact store | shared/GCS path for `/models/*.onnx`; engines read on `model:invalidate` |
 
 ### GCP-side notes

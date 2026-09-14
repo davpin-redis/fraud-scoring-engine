@@ -17,8 +17,9 @@ import sys
 import threading
 
 sys.path.insert(0, os.path.dirname(__file__))
-from common import TXN_STREAM, redis_client
-from labels import CONFIRMED_FRAUD, CONFIRMED_LEGIT, submit_label
+from common import LABELS_PARQUET, TXN_STREAM, redis_client
+from labels import CONFIRMED_FRAUD, CONFIRMED_LEGIT, persist_labels, submit_label
+from parquet_writer import should_flush
 
 GROUP = "chargeback-feed"
 CHARGEBACK_PROB = 0.85      # fraction of true fraud that gets charged back / confirmed
@@ -41,7 +42,10 @@ def classify(event: dict, rng: random.Random,
     return (CONFIRMED_LEGIT, "manual_review") if rng.random() < legit_rate else None
 
 
-def react_once(r, rng: random.Random, count: int = 1000, block_ms: int = 1000) -> dict:
+def react_once(r, rng: random.Random, count: int = 1000, block_ms: int = 1000,
+               out_records: list | None = None) -> dict:
+    """Submit labels to the Redis online store; append the submitted records to `out_records`
+    (if given) so the caller can roll them into the labels Parquet for the DuckDB join."""
     resp = r.xreadgroup(GROUP, "cb1", {TXN_STREAM: ">"}, count=count, block=block_ms)
     if not resp:
         return {"fraud": 0, "legit": 0}
@@ -58,27 +62,35 @@ def react_once(r, rng: random.Random, count: int = 1000, block_ms: int = 1000) -
             if not decided:
                 continue
             label, source = decided
-            submit_label(r, tid, label, source, txn_ts_ms=int(ev.get("timestamp_epoch_ms", 0)),
-                         receiver_account=ev.get("receiver_account"),
-                         device_fingerprint=ev.get("device_fingerprint"))
+            rec = submit_label(r, tid, label, source, txn_ts_ms=int(ev.get("timestamp_epoch_ms", 0)),
+                               receiver_account=ev.get("receiver_account"),
+                               device_fingerprint=ev.get("device_fingerprint"))
+            if out_records is not None:
+                out_records.append(rec)
             out["fraud" if label == CONFIRMED_FRAUD else "legit"] += 1
     if ids:
         r.xack(TXN_STREAM, GROUP, *ids)
     return out
 
 
-def run(stop: threading.Event | None = None, seed: int = 0):  # pragma: no cover
+def run(stop: threading.Event | None = None, seed: int = 0,
+        labels_dir: str = LABELS_PARQUET):  # pragma: no cover
+    """Label online (Redis) for the fast loop AND roll labels to Parquet for the retrain join."""
+    import time
     r = redis_client()
     rng = random.Random(seed)
     try:
         r.xgroup_create(TXN_STREAM, GROUP, id="0", mkstream=True)
     except Exception:
         pass
-    print(f"[chargeback_feed] labelling {TXN_STREAM} -> label store")
+    print(f"[chargeback_feed] labelling {TXN_STREAM} -> Redis + {labels_dir}")
+    buf, last_flush = [], time.monotonic()
     while stop is None or not stop.is_set():
-        n = react_once(r, rng)
-        if n["fraud"] or n["legit"]:
-            print(f"[chargeback_feed] +{n['fraud']} fraud, +{n['legit']} legit labels")
+        n = react_once(r, rng, out_records=buf)
+        if should_flush(len(buf), time.monotonic() - last_flush):
+            persist_labels(buf, labels_dir)             # rolled labels Parquet (few large files)
+            print(f"[chargeback_feed] rolled {len(buf)} labels -> Parquet")
+            buf, last_flush = [], time.monotonic()
 
 
 if __name__ == "__main__":  # pragma: no cover

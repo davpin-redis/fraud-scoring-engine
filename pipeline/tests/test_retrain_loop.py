@@ -43,7 +43,7 @@ def _legit_snap():
             "amount_zscore_90d": 0, "amount_base": 100, "account_age_days": 1500, "local_hour": 12}
 
 
-def test_build_training_set_joins_labels_and_snapshots(tmp_path):
+def _write_join_fixture(tmp_path):
     audit = str(tmp_path / "audit")
     labels = str(tmp_path / "labels")
     recs, labrecs = [], []
@@ -55,10 +55,41 @@ def test_build_training_set_joins_labels_and_snapshots(tmp_path):
         labrecs.append(lb.label_record(f"g{i}", lb.CONFIRMED_LEGIT, "simulation", txn_ts_ms=1, labeled_at_ms=1))
     pw.write_batch(recs, base_dir=audit)
     lb.persist_labels(labrecs, base_dir=labels)
+    return audit, labels
 
-    X, y = rl.build_training_set(audit, labels, now_ms=10**13, maturation_ms=0)
+
+def test_build_training_set_duckdb_joins_labels_and_snapshots(tmp_path):
+    audit, labels = _write_join_fixture(tmp_path)
+    X, y = rl.build_training_set(audit, labels, now_ms=10**13, maturation_ms=0)  # duckdb path
     assert X.shape == (200, len(FEATURES))
     assert int(y.sum()) == 60
+    # a fraud row's velocity_ratio_1h feature survives the JSON extraction
+    vr = X[y == 1][:, FEATURES.index("velocity_ratio_1h")]
+    assert vr.min() >= 6.0
+
+
+def test_duckdb_matches_pyarrow(tmp_path):
+    audit, labels = _write_join_fixture(tmp_path)
+    Xd, yd = rl.build_training_set(audit, labels, 10**13, 0, use_duckdb=True)
+    Xp, yp = rl.build_training_set(audit, labels, 10**13, 0, use_duckdb=False)
+    assert int(yd.sum()) == int(yp.sum()) == 60
+    assert Xd.shape == Xp.shape
+    # same rows (order differs) -> equal column sums
+    assert np.allclose(np.sort(Xd.sum(axis=0)), np.sort(Xp.sum(axis=0)))
+
+
+def test_duckdb_sample_cap_bounds_rows(tmp_path):
+    audit, labels = _write_join_fixture(tmp_path)
+    X, y = rl.build_training_set(audit, labels, 10**13, 0, sample_cap=50)
+    assert len(y) == 50 and X.shape == (50, len(FEATURES))
+
+
+def test_maturation_filter_excludes_unmatured_legit(tmp_path):
+    audit, labels = _write_join_fixture(tmp_path)
+    # legit labels have txn_ts_ms=1; with a huge maturation window and now just past it,
+    # legit are excluded but fraud (immediate) remain.
+    X, y = rl.build_training_set(audit, labels, now_ms=100, maturation_ms=10**9)
+    assert int(y.sum()) == 60 and len(y) == 60   # only the 60 fraud are matured
 
 
 def test_retrain_once_exports_onnx_and_skips_when_sparse(tmp_path):
