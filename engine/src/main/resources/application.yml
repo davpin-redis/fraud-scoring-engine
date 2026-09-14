@@ -30,8 +30,13 @@ fraud:
     log-calls: true
   model:
     # When false, scoring bypasses the ML model entirely (seed-v0 rules-only).
-    # When true, the embedded model (ml/train.py artifact) is loaded and called.
+    # When true, the embedded model is loaded and called as an extra escalation check (§8.3).
     enabled: false
+    # Which scorer to load when enabled: 'linear' (classpath logistic, ml/train.py) or
+    # 'onnx' (the Track-A feedback model, hot-reloaded from `path` on model:invalidate, §8.4.3).
+    type: linear
+    # Filesystem path to the ONNX artifact (+ <name>.manifest.json sidecar) when type=onnx.
+    path: model/fraud-model.onnx
 
 server:
   port: 8080

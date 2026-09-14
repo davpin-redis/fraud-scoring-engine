@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.redis.fraud.feature.FeatureVector;
 import java.io.InputStream;
 import java.util.List;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.ObjectMapper;
 
@@ -18,7 +18,7 @@ import tools.jackson.databind.ObjectMapper;
  * is absent and scoring bypasses the model entirely (seed-v0 rules-only).
  */
 @Component
-@ConditionalOnProperty(prefix = "fraud.model", name = "enabled", havingValue = "true")
+@ConditionalOnExpression("${fraud.model.enabled:false} and '${fraud.model.type:linear}' == 'linear'")
 public class LinearModelScorer implements ModelScorer {
 
     private static final String MODEL_RESOURCE = "/model/model.json";

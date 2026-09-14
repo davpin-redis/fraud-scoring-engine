@@ -38,6 +38,12 @@
       <groupId>io.lettuce</groupId>
       <artifactId>lettuce-core</artifactId>
     </dependency>
+    <dependency>
+      <!-- in-process ONNX scoring for the Track-A feedback model (design doc §8.4.3) -->
+      <groupId>com.microsoft.onnxruntime</groupId>
+      <artifactId>onnxruntime</artifactId>
+      <version>1.19.2</version>
+    </dependency>
 
     <dependency>
       <groupId>org.springframework.boot</groupId>

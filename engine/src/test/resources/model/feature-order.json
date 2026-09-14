@@ -1,0 +1,16 @@
+[
+  "velocity_ratio_1h",
+  "customer_txn_rate_5m",
+  "customer_declines_90d",
+  "customer_distinct_bene_90d",
+  "bene_distinct_senders_90d",
+  "amount_zscore_90d",
+  "device_distinct_customers",
+  "dormancy_days",
+  "device_surge",
+  "bene_surge",
+  "new_payee",
+  "amount_base",
+  "local_hour",
+  "account_age_days"
+]
