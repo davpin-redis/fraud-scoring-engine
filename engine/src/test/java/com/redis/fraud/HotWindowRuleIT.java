@@ -151,6 +151,24 @@ class HotWindowRuleIT extends AbstractTwoRedisIT {
         assertThat(resp.get("feature_snapshot").get("customer_distinct_bene_90d").asLong()).isEqualTo(1L);
     }
 
+    @Test
+    void featureSnapshotCarriesTheModelFeatureContract() throws Exception {
+        // The 14 Track-A model features (pipeline/generator.py FEATURES) must all be present in
+        // the persisted feature_snapshot so retrain_loop can rebuild input vectors from it (§8.4.3).
+        // cust_001 is a seeded fixture customer (has a profile → account_age_days is known);
+        // bene_zzz_new is a first-time payee → new_payee = 1.
+        JsonNode snap = score("hw_feat", "cust_001", "bene_zzz_new", 1200.0)
+                .get("feature_snapshot");
+        for (String f : List.of(
+                "velocity_ratio_1h", "customer_txn_rate_5m", "customer_declines_90d",
+                "customer_distinct_bene_90d", "bene_distinct_senders_90d", "amount_zscore_90d",
+                "device_distinct_customers", "dormancy_days", "device_surge", "bene_surge",
+                "new_payee", "amount_base", "local_hour", "account_age_days")) {
+            assertThat(snap.has(f)).as("feature_snapshot missing '%s'", f).isTrue();
+        }
+        assertThat(snap.get("new_payee").asDouble()).isEqualTo(1.0);   // first payment to this payee
+    }
+
     private List<String> ruleIds(JsonNode resp) {
         List<String> ids = new ArrayList<>();
         resp.get("rules_fired").forEach(n -> ids.add(n.asString()));

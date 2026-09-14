@@ -393,12 +393,17 @@ Set per instance: `fraud.model.enabled=true`, `fraud.model.type=onnx`,
 `model:invalidate` (hot-swap the model) and `cfg:invalidate` (rules/bands).
 
 ### 4. Drive traffic + labels (D4-large)
-- **Gatling @ 1,000 tx/s** emitting the feedback-loop scenario — stealth fraud (low device-
-  sharing), look-alike legit (shared device), and fraud rings reusing a bounded set of mule
-  payees / farm devices (mirrors `pipeline/generator.py`; extend `FraudScoringSimulation`).
-- **Label feed:** a chargeback/analyst simulator submits matured labels to the label store
-  (`pipeline/labels.py submit_label`, incl. entities) — this is the ground truth the retrain
-  and fast loops consume. Compress the maturation lag for the demo.
+```bash
+# Gatling @ 1,000 tx/s — fraud rings (mule_/farm_ entities) + look-alike legit (shared_ device)
+cd loadtest && ./mvnw -q gatling:test -Dgatling.simulationClass=fraud.FeedbackLoopSimulation \
+  -DbaseUrl=http://$LB_VIP:8080 -Dscenario=steady -Dtps=1000 -Dcustomers=5000000 &
+# Label feed — infers fraud from the mule_/farm_ entity scheme, submits matured labels
+REDIS_URL=redis://$STORE:6379 python3 pipeline/chargeback_feed.py &
+```
+`FeedbackLoopSimulation` emits the same three-process mixture as the offline generator; the
+chargeback feed is the ground truth the retrain + fast loops consume (compress the maturation
+lag for the demo). Both are provided and CI-checked (the Gatling sim compiles; the feed is
+unit-tested).
 
 ### 5. Watch
 Open `http://<pipeline-vm>:8090/` — recall / FPR / precision **aggregated across all engines**
@@ -416,10 +421,12 @@ the marker; `SCARD bl:accounts` grows as the fast loop contains rings.
 | retrain_loop | 1 VM with a few GB RAM; trains on a **sample** of matured labels (tens of thousands–low millions of rows), minutes per round — independent of the 5M population (§13.6.4). LightGBM here needs `libgomp1`; the default sklearn HGB needs nothing |
 | Model artifact store | shared/GCS path for `/models/*.onnx`; engines read on `model:invalidate` |
 
-### To implement on the GCP side (not needed for the CI-proven small run)
-1. **Engine feature snapshot** must expose the model's feature keys (`new_payee`,
-   `device_distinct_customers`, …) so `retrain_loop` can rebuild vectors from
-   `feature_snapshot_json`; add any missing keys to the assembled feature map.
-2. **Gatling feedback-loop scenario** + the **label/chargeback feed** (steps 4).
-3. **Model path** on a shared/GCS volume; confirm `model:invalidate` reaches all engines
-   (cluster-wide Pub/Sub).
+### GCP-side notes
+1. **Engine feature snapshot** exposes all 14 model feature keys incl. `new_payee` (derived
+   from the pair state) — verified by `HotWindowRuleIT.featureSnapshotCarriesTheModelFeatureContract`.
+   `retrain_loop` rebuilds vectors from `feature_snapshot_json` directly.
+2. **Gatling feedback scenario** (`FeedbackLoopSimulation`) + **label feed** (`chargeback_feed.py`)
+   provided (step 4).
+3. **Model path** must be a shared/GCS-backed volume all engines read (`fraud.model.path`), so a
+   `retrain_loop` export + `model:invalidate` (cluster-wide Pub/Sub) hot-swaps every instance.
+   This is the one remaining deployment-config item (no code).
