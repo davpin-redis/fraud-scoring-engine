@@ -353,3 +353,73 @@ Sizing notes:
 2. `--customers` / `--flagged` on both seeders = Gatling `-Dcustomers` / `-DhighRisk`.
 3. Load the feature-store config (`load_redis.py`) **before** the feature seeder, and
    never `--flush` after the config is in.
+
+---
+
+## Feedback-loop run (large scale, 5M / 1,000 tx/s)
+
+Runs the continuous-learning loop (design doc §8.4) at production scale so the live
+cross-instance dashboard (§10.3) shows **fraud detection rising and false positives
+falling** as the loop retrains. Builds on the load-test topology above; adds the audit
+stream, label pipeline, aggregator/dashboard, and the retrain/fast loops. Small-scale
+equivalents are proven in CI (`pipeline/` + engine tests); this is the distributed run.
+
+**Collapsed store:** feature + signal stores are one Redis (design doc §13.6.6) — point
+both `fraud.feature-store.uri` and `fraud.signal-store.uri` at it.
+
+### 1. Seed (D3-large)
+```bash
+# reference data + cfg (rules incl. the blunt device rule + cfg:bands) into the one store
+python3 test_data/load_redis.py --redis-url redis://$STORE:6379/0        # config + fixtures
+# 5M warm signals, sharded across VMs (both families land in the one store)
+python3 test_data/seed_feature_store.py --host $STORE --port 6379 --customers 5000000 --procs 16
+python3 test_data/seed_signal_store.py  --host $STORE --port 6379 --customers 5000000 --flagged 50000 --procs 16
+```
+
+### 2. Pipeline services (one small VM; scale the Parquet writer + embedding-style consumers horizontally)
+```bash
+REDIS_URL=redis://$STORE:6379 PIPELINE_DATA=/data/parquet \
+  python3 pipeline/parquet_writer.py &                 # A3: txn:events -> Parquet (system of record; run N in the group)
+python3 pipeline/fast_loop.py &                        # B6: confirmed fraud -> bl:* (R001/R002 catch repeats live)
+python3 -m uvicorn --app-dir pipeline aggregator:create_app --factory --port 8090 &   # C1 + dashboard
+python3 pipeline/retrain_loop.py --audit /data/parquet/transactions --labels /data/parquet/labels \
+  --model-out /models --interval 900 &                 # slow loop: retrain -> ONNX -> publish model:invalidate
+```
+
+### 3. Engines (N instances, behind the L4 LB as in §6)
+Set per instance: `fraud.model.enabled=true`, `fraud.model.type=onnx`,
+`fraud.model.path=/models/fraud-model.onnx` (a **shared/GCS-backed** path all engines read),
+`fraud.audit-sink.type=redis-stream`, both store URIs → `$STORE`. Each engine subscribes to
+`model:invalidate` (hot-swap the model) and `cfg:invalidate` (rules/bands).
+
+### 4. Drive traffic + labels (D4-large)
+- **Gatling @ 1,000 tx/s** emitting the feedback-loop scenario — stealth fraud (low device-
+  sharing), look-alike legit (shared device), and fraud rings reusing a bounded set of mule
+  payees / farm devices (mirrors `pipeline/generator.py`; extend `FraudScoringSimulation`).
+- **Label feed:** a chargeback/analyst simulator submits matured labels to the label store
+  (`pipeline/labels.py submit_label`, incl. entities) — this is the ground truth the retrain
+  and fast loops consume. Compress the maturation lag for the demo.
+
+### 5. Watch
+Open `http://<pipeline-vm>:8090/` — recall / FPR / precision **aggregated across all engines**
+(from the shared stream + Redis counters, not per-instance actuators). As `retrain_loop`
+ships a better ONNX (or you click **Apply feedback**), recall steps up and FPR steps down at
+the marker; `SCARD bl:accounts` grows as the fast loop contains rings.
+
+### Sizing (added components, on top of §Sizing)
+| Component | Guidance |
+|---|---|
+| Redis Stream `txn:events` | bounded (`MAXLEN ~`), a few hundred MB; transport only — Parquet is the archive |
+| Parquet writer | 1–2 vCPU per consumer; scale the consumer group to keep up with 1–2k events/s (2 per txn: engine emits one; the demo orchestrator two) |
+| Parquet store | ~1–2 KB/txn × retention; on GCS/PD — the durable training corpus |
+| Aggregator + dashboard | 1 small VM (rolling Redis counters + SSE); stateless |
+| retrain_loop | 1 VM with a few GB RAM; trains on a **sample** of matured labels (tens of thousands–low millions of rows), minutes per round — independent of the 5M population (§13.6.4). LightGBM here needs `libgomp1`; the default sklearn HGB needs nothing |
+| Model artifact store | shared/GCS path for `/models/*.onnx`; engines read on `model:invalidate` |
+
+### To implement on the GCP side (not needed for the CI-proven small run)
+1. **Engine feature snapshot** must expose the model's feature keys (`new_payee`,
+   `device_distinct_customers`, …) so `retrain_loop` can rebuild vectors from
+   `feature_snapshot_json`; add any missing keys to the assembled feature map.
+2. **Gatling feedback-loop scenario** + the **label/chargeback feed** (steps 4).
+3. **Model path** on a shared/GCS volume; confirm `model:invalidate` reaches all engines
+   (cluster-wide Pub/Sub).

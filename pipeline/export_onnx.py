@@ -23,22 +23,30 @@ from model import train
 OPSET = 17
 
 
-def export(sim_dir: str, out_dir: str, name: str, upto_round: int, version: str, seed: int = 0):
-    X, y, _ = dataset.rounds_upto(sim_dir, upto_round, include_warmup=True)
-    mdl = train(X, y, seed=seed)
+def export_trained(model, out_dir: str, name: str, version: str, extra: dict | None = None) -> str:
+    """Export an already-trained model to ONNX + manifest (the feature contract). Returns the
+    .onnx path. Writes atomically (temp + rename) so an engine reload never sees a half file."""
     initial = [("features", FloatTensorType([None, len(FEATURES)]))]
-    onx = to_onnx(mdl, initial_types=initial, target_opset=OPSET,
-                  options={id(mdl): {"zipmap": False}})
+    onx = to_onnx(model, initial_types=initial, target_opset=OPSET, options={id(model): {"zipmap": False}})
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, f"{name}.onnx"), "wb") as fh:
+    onnx_path = os.path.join(out_dir, f"{name}.onnx")
+    tmp = onnx_path + ".tmp"
+    with open(tmp, "wb") as fh:
         fh.write(onx.SerializeToString())
+    manifest = {"version": version, "features": FEATURES, "n_features": len(FEATURES), "opset": OPSET}
+    manifest.update(extra or {})
     with open(os.path.join(out_dir, f"{name}.manifest.json"), "w") as fh:
-        json.dump({"version": version, "features": FEATURES, "n_features": len(FEATURES),
-                   "upto_round": upto_round, "opset": OPSET}, fh, indent=2)
-    # the ordered feature contract shared with the engine
+        json.dump(manifest, fh, indent=2)
     with open(os.path.join(out_dir, "feature-order.json"), "w") as fh:
         json.dump(FEATURES, fh, indent=2)
-    print(f"[export_onnx] {name}.onnx (round {upto_round}, {len(FEATURES)} features, opset {OPSET}) -> {out_dir}")
+    os.replace(tmp, onnx_path)                     # atomic publish
+    print(f"[export_onnx] {name}.onnx v={version} ({len(FEATURES)} features, opset {OPSET}) -> {out_dir}")
+    return onnx_path
+
+
+def export(sim_dir: str, out_dir: str, name: str, upto_round: int, version: str, seed: int = 0):
+    X, y, _ = dataset.rounds_upto(sim_dir, upto_round, include_warmup=True)
+    export_trained(train(X, y, seed=seed), out_dir, name, version, extra={"upto_round": upto_round})
 
 
 if __name__ == "__main__":
