@@ -59,7 +59,7 @@ public class SignalReader {
 
     public Map<String, Object> read(ScoreRequest request) {
         String cid = request.customerId();
-        String bene = request.receiverTransactionBankAccountNumber();
+        String bene = request.receiverAccount();
         String device = request.deviceFingerprint();
         Instant now = OffsetDateTime.parse(request.timestamp()).toInstant();
         long nowMs = now.toEpochMilli();

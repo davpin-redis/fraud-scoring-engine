@@ -34,7 +34,7 @@
   },
   {
     "metric_id": "bene_distinct_senders_24h",
-    "entity": "receiver_transaction_bank_account_number",
+    "entity": "receiver_account",
     "type": "streaming_aggregate",
     "agg": "distinct_count",
     "field": "customer_id",
@@ -42,7 +42,7 @@
   },
   {
     "metric_id": "pair_txn_count_90d",
-    "entity": "[customer_id, receiver_transaction_bank_account_number]",
+    "entity": "[customer_id, receiver_account]",
     "type": "streaming_aggregate",
     "agg": "count",
     "field": "amount_base",

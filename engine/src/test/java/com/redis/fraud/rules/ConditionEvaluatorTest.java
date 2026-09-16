@@ -28,8 +28,8 @@ class ConditionEvaluatorTest {
 
     @Test
     void setMembership() {
-        assertThat(eval("receiver_transaction_bank_account_number in bl_accounts",
-                Map.of("receiver_transaction_bank_account_number", "bene_020", "bl_accounts", Set.of("bene_020")))).isTrue();
+        assertThat(eval("receiver_account in bl_accounts",
+                Map.of("receiver_account", "bene_020", "bl_accounts", Set.of("bene_020")))).isTrue();
         assertThat(eval("customer_id in vip_customers",
                 Map.of("customer_id", "cust_046", "vip_customers", Set.of("cust_046")))).isTrue();
         assertThat(eval("customer_id in watchlist",

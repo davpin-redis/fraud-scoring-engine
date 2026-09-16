@@ -71,7 +71,7 @@ public final class RedisFixtureLoader {
             r.hset("c:{" + c.get("customer_id").asString() + "}:profile", profile);
         }
         for (JsonNode b : readTree("reference", "beneficiaries.json")) {
-            r.hset("bene:{" + b.get("receiver_transaction_bank_account_number").asString() + "}:profile",
+            r.hset("bene:{" + b.get("receiver_account").asString() + "}:profile",
                     "country", b.get("country").asString());
         }
         JsonNode ipgeo = readTree("reference", "ip_geo.json");
@@ -95,7 +95,7 @@ public final class RedisFixtureLoader {
 
     private void applyTransaction(JsonNode txn) {
         String cid = txn.get("customer_id").asString();
-        String bene = txn.get("receiver_transaction_bank_account_number").asString();
+        String bene = txn.get("receiver_account").asString();
         String country = txn.get("customer_portfolio_country").asString();
         String tpp = txn.get("tpp_name_ud").asString();
         double amount = txn.get("amount_base").doubleValue();  // base-currency amount (§7.4)

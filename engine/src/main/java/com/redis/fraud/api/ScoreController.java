@@ -121,7 +121,7 @@ public class ScoreController {
         return new ScoredTransaction(
                 request.transactionId(),
                 request.customerId(),
-                request.receiverTransactionBankAccountNumber(),
+                request.receiverAccount(),
                 result.decision(),
                 result.modelVersion(),
                 result.finalScore(),

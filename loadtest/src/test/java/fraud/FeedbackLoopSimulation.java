@@ -83,7 +83,7 @@ public class FeedbackLoopSimulation extends Simulation {
             }
             row.put("transaction_id", "fl" + Long.toString(n, 36));
             row.put("customer_id", String.format("cust_%03d", 1 + rnd(CUSTOMERS)));
-            row.put("receiver_transaction_bank_account_number", bene);
+            row.put("receiver_account", bene);
             row.put("device_fingerprint", device);
             row.put("tpp_name_ud", TPPS[rnd(TPPS.length)]);
             row.put("customer_portfolio_country", COUNTRIES[rnd(COUNTRIES.length)]);
@@ -97,7 +97,7 @@ public class FeedbackLoopSimulation extends Simulation {
     private static final String BODY = """
             {"transaction_id":"#{transaction_id}","timestamp":"#{timestamp}",
              "customer_id":"#{customer_id}","customer_portfolio_country":"#{customer_portfolio_country}",
-             "receiver_transaction_bank_account_number":"#{receiver_transaction_bank_account_number}",
+             "receiver_account":"#{receiver_account}",
              "tpp_name_ud":"#{tpp_name_ud}","device_fingerprint":"#{device_fingerprint}",
              "amount":#{amount},"currency":"#{currency}"}
             """;

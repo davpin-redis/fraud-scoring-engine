@@ -94,7 +94,7 @@ def gen_beneficiaries():
     for i in range(1, 21):
         bid = f"bene_{i:03d}"
         benes.append({
-            "receiver_transaction_bank_account_number": bid,
+            "receiver_account": bid,
             "country": random.choices(COUNTRIES, weights=COUNTRY_WEIGHTS)[0],
             "is_mule_pattern": bid in ("bene_018", "bene_019"),
         })
@@ -193,7 +193,7 @@ def gen_metrics_config():
         },
         {
             "metric_id": "bene_distinct_senders_24h",
-            "entity": "receiver_transaction_bank_account_number",
+            "entity": "receiver_account",
             "type": "streaming_aggregate",
             "agg": "distinct_count",
             "field": "customer_id",
@@ -201,7 +201,7 @@ def gen_metrics_config():
         },
         {
             "metric_id": "pair_txn_count_90d",
-            "entity": "[customer_id, receiver_transaction_bank_account_number]",
+            "entity": "[customer_id, receiver_account]",
             "type": "streaming_aggregate",
             "agg": "count",
             "field": "amount_base",
@@ -215,7 +215,7 @@ def gen_rules_config():
         {
             "rule_id": "R001_blacklisted_beneficiary",
             "type": "hard_block",
-            "condition": "receiver_transaction_bank_account_number in bl_accounts",
+            "condition": "receiver_account in bl_accounts",
         },
         {
             "rule_id": "R002_blacklisted_device",
@@ -381,7 +381,7 @@ def new_txn(customer, bene_id, amount, ts, tpp, txn_id):
         "timestamp": ts.isoformat(),
         "customer_id": customer["customer_id"],
         "customer_portfolio_country": customer["customer_portfolio_country"],
-        "receiver_transaction_bank_account_number": bene_id,
+        "receiver_account": bene_id,
         "tpp_name_ud": tpp,
         "device_fingerprint": customer["device_fingerprint"],
         "ip_address": customer["ip_address"],
@@ -394,7 +394,7 @@ def new_txn(customer, bene_id, amount, ts, tpp, txn_id):
 def gen_backfill_and_samples(customers, benes, tpps):
     by_id = {c["customer_id"]: c for c in customers}
     tpp_names = [t["tpp_name_ud"] for t in tpps]
-    normal_benes = [b["receiver_transaction_bank_account_number"] for b in benes if not b["is_mule_pattern"]]
+    normal_benes = [b["receiver_account"] for b in benes if not b["is_mule_pattern"]]
 
     txns = []
     seq = [0]

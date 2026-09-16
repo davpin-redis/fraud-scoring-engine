@@ -1,5 +1,13 @@
 # Real-Time Transaction Fraud Scoring System
 
+> ⚠️ **Demo / educational project only.** This repository exists to demonstrate
+> architectural patterns. It is **not production-ready**, has **not** been security-
+> or compliance-reviewed, and comes with no warranty or support. All rules,
+> features, thresholds, entities, and data are **synthetic and illustrative** — they
+> are **not** derived from, trained on, or representative of any real institution,
+> customer, or production workload. Do not use it, or any part of it, to make real
+> decisions about real transactions.
+
 A reference implementation of the design in
 [`Fraud_Scoring_System_Design_Doc.md`](Fraud_Scoring_System_Design_Doc.md): a
 Java 25 / Spring Boot 4 engine that scores payment transactions synchronously

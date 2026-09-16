@@ -182,7 +182,7 @@ class HotWindowRuleIT extends AbstractTwoRedisIT {
     private JsonNode score(String txnId, String cid, String bene, double amount, String device) throws Exception {
         String body = """
                 {"transaction_id":"%s","timestamp":"%s","customer_id":"%s",
-                 "customer_portfolio_country":"GB","receiver_transaction_bank_account_number":"%s",
+                 "customer_portfolio_country":"GB","receiver_account":"%s",
                  "tpp_name_ud":"tpp_Alpha","device_fingerprint":"%s","amount":%s,"currency":"GBP"}
                 """.formatted(txnId, REF_TS, cid, bene, device, amount);
         HttpResponse<String> resp = http.send(

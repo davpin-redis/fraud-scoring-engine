@@ -40,7 +40,7 @@ BLUNT_THRESHOLD = 2
 PRESETS = {
     # laptop / CI — small but enough fraud per round for stable metrics
     "small": dict(customers=5_000, benes=1_000, mules=50, devices=4_000, farm=15, tpps=5,
-                  warmup_txns=20_000, rounds=10, txns_per_round=10_000, holdout_txns=20_000,
+                  warmup_txns=6_000, rounds=10, txns_per_round=3_000, holdout_txns=60_000,
                   fraud_rate=0.01, lookalike_rate=0.08),
     # distributed / prod-scale — file generator sizes population+backfill+holdout; the
     # 1,000 tx/s streaming is driven by Gatling (Phase 5), not this file emitter.
@@ -94,7 +94,8 @@ def _fraud(rng: np.random.Generator, n: int) -> dict:
     )
     fan_in = np.where(stealth, rng.integers(3, 12, n), rng.integers(15, 45, n)).astype(float)
     # ~35% of fraud is "hard": drawn almost like legit (only faintly shifted), giving irreducible
-    # overlap so the Bayes-optimal AUC is <1 and the model must earn recall with more labels.
+    # overlap so the Bayes-optimal AUC is <1 and the model must earn recall with more labels
+    # (a visible multi-round learning curve, not instant saturation).
     hard = rng.random(n) < 0.35
     shift = np.where(hard, 0.30, 1.0)   # hard fraud barely shifted
     return dict(

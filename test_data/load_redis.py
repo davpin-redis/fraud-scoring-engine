@@ -81,7 +81,7 @@ def bump_amount_stats(r, key, amount):
 
 def apply_transaction(r, txn):
     cid = txn["customer_id"]
-    bene = txn["receiver_transaction_bank_account_number"]
+    bene = txn["receiver_account"]
     country = txn["customer_portfolio_country"]
     tpp = txn["tpp_name_ud"]
     amount = float(txn["amount_base"])
@@ -171,7 +171,7 @@ def main():
             "risk_segment": c["risk_segment"],
         })
     for b in load_json("reference", "beneficiaries.json"):
-        r.hset(f"bene:{{{b['receiver_transaction_bank_account_number']}}}:profile", "country", b["country"])
+        r.hset(f"bene:{{{b['receiver_account']}}}:profile", "country", b["country"])
     ipgeo = load_json("reference", "ip_geo.json")
     for prefix, country in ipgeo["prefixes"].items():
         r.hset("geo:ip_prefixes", prefix, country)

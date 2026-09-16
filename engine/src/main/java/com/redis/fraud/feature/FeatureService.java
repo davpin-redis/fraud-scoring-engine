@@ -60,7 +60,7 @@ public class FeatureService {
     public FeatureVector assemble(ScoreRequest request) {
         Instant now = OffsetDateTime.parse(request.timestamp()).toInstant();
         String cid = request.customerId();
-        String bene = request.receiverTransactionBankAccountNumber();
+        String bene = request.receiverAccount();
 
         RedisAsyncCommands<String, String> async = connection.async();
         List<RedisFuture<?>> futures = new ArrayList<>();

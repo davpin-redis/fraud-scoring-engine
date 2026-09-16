@@ -384,8 +384,9 @@ MODELS=/models                              # shared path engines read fraud.mod
 ```bash
 # reference data + cfg (rules incl. the blunt device rule + cfg:bands) into the one store
 python3 test_data/load_redis.py --redis-url redis://$STORE:6379/0        # config + fixtures
-# 5M warm signals, sharded across VMs (both families land in the one store)
-python3 test_data/seed_feature_store.py --host $STORE --port 6379 --customers 5000000 --procs 16
+# 5M warm signals — run this sharded across the 5 engine VMs (see "Compute" below).
+# Single-VM form (dev / smaller run); --days 30 matches the 200 GB no-HA sizing:
+python3 test_data/seed_feature_store.py --host $STORE --port 6379 --customers 5000000 --days 30 --procs 16
 python3 test_data/seed_signal_store.py  --host $STORE --port 6379 --customers 5000000 --flagged 50000 --procs 16
 ```
 
@@ -399,7 +400,7 @@ python3 pipeline/retrain_loop.py --audit /data/parquet/transactions --labels /da
   --model-out /models --interval 900 &                 # slow loop: retrain -> ONNX -> publish model:invalidate
 ```
 
-### 3. Engines (N instances, behind the L4 LB as in §6)
+### 3. Engines (5 instances, behind the L4 LB as in §6)
 Set per instance: `fraud.model.enabled=true`, `fraud.model.type=onnx`,
 `fraud.model.path=/models/fraud-model.onnx` (a **shared/GCS-backed** path all engines read),
 `fraud.audit-sink.type=redis-stream`, both store URIs → `$STORE`. Each engine subscribes to
@@ -427,24 +428,54 @@ the marker; `SCARD bl:accounts` grows as the fast loop contains rings.
 ### Compute (feedback-loop run)
 | Component | VM | Count |
 |---|---|---|
-| Scoring engines | `e2-standard-8` (`-Xmx4g`) | 3 (→5 for 3–5k burst) |
+| Scoring engines | `e2-standard-8` (`-Xmx4g`) | **5** |
 | Pipeline services (Parquet writer×2–4, aggregator+dashboard, fast loop, chargeback feed) | `e2-standard-8` | 1 |
 | retrain_loop | `e2-standard-8` (or share pipeline VM) | 1 |
 | Gatling driver | `e2-standard-8` | 1 |
-| Seeder VMs (one-off, then release) | `e2-standard-16` | 4 |
+| Seeder VMs | — | **reuse the 5 engine VMs** (see below) |
 
-### Redis cluster sizing (collapsed store, 5M / 1,000 tx/s)
-Capacity (90-day history): feature ~120 GB + signal <20 GB + cached decisions ~13 GB
-(24 h TTL) + streams/labels/metrics/bl/cfg ~3–5 GB ≈ **~155 GB raw** → **~195 GB** with
-~25% overhead → **provision ~300 GB usable** (keep util < ~65%).
+**Seed on the engine VMs.** Seeding runs once, before traffic — the engines are idle then —
+so the 5 engine VMs double as the seeder pool instead of spinning up transient VMs. The
+seeders shard by customer-id range (`--customer-start` + `--customers` = this VM's slice,
+`--total-customers` = grand total so bene/payee pools size identically across VMs), so split
+the 5M range across the 5 VMs (1M each) and run in parallel:
+```bash
+# on engine VM i (i = 0..4): START=$((i * 1000000))
+python3 test_data/seed_feature_store.py --host $STORE --port 6379 \
+  --customer-start $START --customers 1000000 --total-customers 5000000 --days 30 --procs 8
+python3 test_data/seed_signal_store.py  --host $STORE --port 6379 \
+  --customer-start $START --customers 1000000 --total-customers 5000000 --flagged 50000 --procs 8
+```
+(`--days 30` matches the 200 GB sizing below. Flagged high-risk ids are `cust_1..flagged`, so
+run `--flagged 50000` on VM 0 only; other VMs pass `--flagged 0`.)
+Then start the engine process on each VM (§3) for the traffic phase. (`e2-standard-8` seeds
+comfortably; the bottleneck is Redis write throughput, not the seeder CPU.)
 
-- **Shards:** **12 primaries** (~16 GB each — under the ~25 GB/shard ceiling). Throughput is
-  ~75–110K ops/s (≤250K burst) — trivially served; this is **memory-bound**, so capacity drives
-  the shard count, not ops.
-- **Nodes — no-HA (demo):** **3 × `n2d-highmem-16`** (128 GB → 384 GB) at ~50% util.
-- **Nodes — HA (replica ×2):** **6 × `n2d-highmem-16`** across 3 AZs (12 primary + 12 replica).
-- **Lever:** seed `--days 30` → feature ~55 GB (total ~90 GB raw), fits **3 × `n2d-highmem-8`**
-  (192 GB) no-HA. `--days 7` smaller still. Full 90d isn't needed for a few-hours feedback demo.
+### Redis cluster sizing (collapsed store, 5M / 1,000 tx/s) — **200 GB, no-HA**
+**Decision: 200 GB database capacity, no replication (single copy).** 200 GB usable at a safe
+~65% working-set utilisation holds **~130 GB**, so seed with the history lever **`--days 30`**
+(not the full 90d): feature ~55 GB + signal <20 GB + cached decisions ~13 GB (24 h TTL) +
+streams/labels/metrics/bl/cfg ~3–5 GB ≈ **~90 GB raw** → **~115 GB** with ~25% overhead — a
+comfortable fit inside 200 GB. (Full 90d ≈ ~155 GB raw would push a 200 GB db past ~90% util;
+it isn't needed for a few-hours feedback demo.)
+
+- **Nodes — no-HA:** **3 × `n2d-highmem-16`** (16 vCPU / 128 GB each → 384 GB total). The 200 GB
+  db is ~67 GB/node = **~52% of node RAM** at the cap (~30% at the actual ~115 GB working set).
+  3 nodes give a real quorum and even shard placement; no replicas, so a node loss drops its
+  ~1/3 of shards — acceptable for the demo, not for prod. (2× `n2d-highmem-8` = 128 GB can't even
+  hold a 200 GB db; 3× highmem-16 is the floor once you fix capacity at 200 GB on 3 nodes.)
+- **Shards: 12 primaries (4 per node).** Shard count here is **memory-bound, not CPU-bound** —
+  total load is only ~75–110K ops/s (≤250K burst), which ~5 shards would serve. The binding
+  constraints are the ~25 GB/shard ceiling (⇒ ≥8 shards for 200 GB) and even placement on 3
+  nodes. 12 lands at **~17 GB/shard db cap** (~10 GB at the working set): comfortable headroom
+  under the ceiling, balanced 4/4/4, uses ~8 of 16 cores for shards leaving the rest for the
+  proxy/OS.
+  - *Why not 8 shards/node (24)?* You can — 16 vCPU runs it and small ~8 GB shards recover fast —
+    but it's past what a memory-bound, low-ops workload needs; it only adds proxy fan-out and
+    connection overhead. Reach for it only if you expect ops (not data) to grow a lot.
+- **If you later want HA:** add a replica copy → 2× the memory → **6 × `n2d-highmem-16`** across
+  ≥3 AZs (12 primary + 12 replica). Out of scope for this run.
+- **Lever:** `--days 7` shrinks feature to ~15 GB (total ~50 GB raw) if you want extra margin.
 
 *(Production may split back into two clusters per §7.12; this run collapses them.)*
 

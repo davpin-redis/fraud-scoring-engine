@@ -1,101 +1,101 @@
 [
   {
-    "receiver_transaction_bank_account_number": "bene_001",
+    "receiver_account": "bene_001",
     "country": "US",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_002",
+    "receiver_account": "bene_002",
     "country": "US",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_003",
+    "receiver_account": "bene_003",
     "country": "US",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_004",
+    "receiver_account": "bene_004",
     "country": "DE",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_005",
+    "receiver_account": "bene_005",
     "country": "SG",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_006",
+    "receiver_account": "bene_006",
     "country": "GB",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_007",
+    "receiver_account": "bene_007",
     "country": "US",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_008",
+    "receiver_account": "bene_008",
     "country": "US",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_009",
+    "receiver_account": "bene_009",
     "country": "BR",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_010",
+    "receiver_account": "bene_010",
     "country": "GB",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_011",
+    "receiver_account": "bene_011",
     "country": "BR",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_012",
+    "receiver_account": "bene_012",
     "country": "SG",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_013",
+    "receiver_account": "bene_013",
     "country": "US",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_014",
+    "receiver_account": "bene_014",
     "country": "DE",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_015",
+    "receiver_account": "bene_015",
     "country": "DE",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_016",
+    "receiver_account": "bene_016",
     "country": "GB",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_017",
+    "receiver_account": "bene_017",
     "country": "US",
     "is_mule_pattern": false
   },
   {
-    "receiver_transaction_bank_account_number": "bene_018",
+    "receiver_account": "bene_018",
     "country": "DE",
     "is_mule_pattern": true
   },
   {
-    "receiver_transaction_bank_account_number": "bene_019",
+    "receiver_account": "bene_019",
     "country": "US",
     "is_mule_pattern": true
   },
   {
-    "receiver_transaction_bank_account_number": "bene_020",
+    "receiver_account": "bene_020",
     "country": "GB",
     "is_mule_pattern": false
   }

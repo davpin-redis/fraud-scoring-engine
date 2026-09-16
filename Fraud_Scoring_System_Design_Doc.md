@@ -349,11 +349,11 @@ Rules and metrics are computed against several different entities, not just the 
 | Group-by key | Entity | Fraud use |
 |---|---|---|
 | `customer_id` | Customer (primary) | Per-customer velocity |
-| `receiver_transaction_bank_account_number` | Beneficiary account | Mule fan-in / bad-bene reuse |
-| `[customer_id, receiver_transaction_bank_account_number]` | Customer → beneficiary pair | New-payee / relationship velocity |
+| `receiver_account` | Beneficiary account | Mule fan-in / bad-bene reuse |
+| `[customer_id, receiver_account]` | Customer → beneficiary pair | New-payee / relationship velocity |
 | `customer_portfolio_country` | Geography | Cross-border, market cohort |
 | `tpp_name_ud` | TPP / third-party provider | Payee / merchant concentration |
-| `[receiver_transaction_bank_account_number, customer_portfolio_country]` | Beneficiary × country | Cross-border mule rings |
+| `[receiver_account, customer_portfolio_country]` | Beneficiary × country | Cross-border mule rings |
 | `[tpp_name_ud, customer_portfolio_country]` | TPP × country | Merchant risk by market |
 
 The same window and metric-type framework (§6.1–6.2) applies to every entity above — a `stddev` streaming aggregate over `last_24h` is computed identically whether it's grouped by `customer_id` or by `[tpp_name_ud, customer_portfolio_country]`; only the group-by key used to address the feature store changes (§7.3, §7.6).

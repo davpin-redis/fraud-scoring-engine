@@ -80,14 +80,14 @@ public class RuleEngine {
 
         // request-level identifiers the conditions may reference
         ctx.put("customer_id", req.customerId());
-        ctx.put("receiver_transaction_bank_account_number", req.receiverTransactionBankAccountNumber());
+        ctx.put("receiver_account", req.receiverAccount());
         ctx.put("device_fingerprint", req.deviceFingerprint());
         ctx.put("tpp_name_ud", req.tppNameUd());
         ctx.put("customer_portfolio_country", req.customerPortfolioCountry());
         // amount_base is supplied by the feature vector (normalized at ingest, §3.2)
 
         // singleton membership sets derived from the precomputed SISMEMBER flags
-        ctx.put("bl_accounts", membership(features.asBoolean("bl_account"), req.receiverTransactionBankAccountNumber()));
+        ctx.put("bl_accounts", membership(features.asBoolean("bl_account"), req.receiverAccount()));
         ctx.put("bl_devices", membership(features.asBoolean("bl_device"), req.deviceFingerprint()));
         ctx.put("vip_customers", membership(features.asBoolean("vip_customer"), req.customerId()));
         ctx.put("watchlist", membership(features.asBoolean("watchlist"), req.customerId()));

@@ -45,7 +45,7 @@ class ModelToggleIT extends AbstractTwoRedisIT {
     void enabledModelStampsItsVersionOnScoredResponse() throws Exception {
         String body = """
                 {"transaction_id":"toggle_1","timestamp":"2026-08-10T12:00:00+00:00","customer_id":"cust_005",
-                 "customer_portfolio_country":"US","receiver_transaction_bank_account_number":"bene_003",
+                 "customer_portfolio_country":"US","receiver_account":"bene_003",
                  "tpp_name_ud":"tpp_Alpha","device_fingerprint":"device_005","amount":65.0,"currency":"GBP"}
                 """;
         HttpResponse<String> resp = HttpClient.newHttpClient().send(

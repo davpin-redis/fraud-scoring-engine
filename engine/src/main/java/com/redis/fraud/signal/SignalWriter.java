@@ -64,7 +64,7 @@ public class SignalWriter {
     /** Returns {@code true} if this call updated the signals, {@code false} on a duplicate. */
     public boolean updateOnce(ScoreRequest request, ScoreResult result) {
         String cid = request.customerId();
-        String bene = request.receiverTransactionBankAccountNumber();
+        String bene = request.receiverAccount();
         Instant now = OffsetDateTime.parse(request.timestamp()).toInstant();
 
         String won = connection.sync().set(SignalKeys.guard(cid, request.transactionId()), "1",

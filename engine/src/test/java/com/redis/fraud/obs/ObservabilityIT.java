@@ -80,7 +80,7 @@ class ObservabilityIT extends AbstractTwoRedisIT {
     private static String request(String txnId, String cid, String country, String bene, String device, double amount) {
         return """
                 {"transaction_id":"%s","timestamp":"2026-08-10T12:00:00+00:00","customer_id":"%s",
-                 "customer_portfolio_country":"%s","receiver_transaction_bank_account_number":"%s",
+                 "customer_portfolio_country":"%s","receiver_account":"%s",
                  "tpp_name_ud":"tpp_Alpha","device_fingerprint":"%s","amount":%s,"currency":"GBP"}
                 """.formatted(txnId, cid, country, bene, device, amount);
     }
