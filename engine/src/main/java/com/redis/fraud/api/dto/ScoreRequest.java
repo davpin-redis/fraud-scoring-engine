@@ -14,7 +14,7 @@ public record ScoreRequest(
         String timestamp,
         String customerId,
         String customerPortfolioCountry,
-        String receiverTransactionBankAccountNumber,
+        String receiverAccount,
         String tppNameUd,
         String deviceFingerprint,
         Double amount,

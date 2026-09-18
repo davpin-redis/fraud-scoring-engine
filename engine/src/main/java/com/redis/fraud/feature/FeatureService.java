@@ -60,7 +60,7 @@ public class FeatureService {
     public FeatureVector assemble(ScoreRequest request) {
         Instant now = OffsetDateTime.parse(request.timestamp()).toInstant();
         String cid = request.customerId();
-        String bene = request.receiverTransactionBankAccountNumber();
+        String bene = request.receiverAccount();
 
         RedisAsyncCommands<String, String> async = connection.async();
         List<RedisFuture<?>> futures = new ArrayList<>();
@@ -202,6 +202,14 @@ public class FeatureService {
             combiners.put(m.metricId(), () -> {
                 String v = get(f);
                 return v == null ? 0L : Long.parseLong(v);
+            });
+            // Derived model feature (§8.4.3): new_payee = the customer has never paid this
+            // beneficiary in the window. Exposed so retrain_loop can rebuild the model's
+            // input vector from feature_snapshot_json without deriving it downstream.
+            combiners.put("new_payee", () -> {
+                String v = get(f);
+                long cnt = v == null ? 0L : Long.parseLong(v);
+                return cnt == 0 ? 1.0 : 0.0;
             });
             return;
         }

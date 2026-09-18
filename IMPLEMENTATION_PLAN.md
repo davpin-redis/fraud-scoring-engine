@@ -47,7 +47,7 @@ steady-state scenario meets p50 ≤ 10 ms / p99 ≤ 30 ms on a test deployment.
   "timestamp": "2026-08-10T12:00:00+00:00",
   "customer_id": "cust_005",
   "customer_portfolio_country": "US",
-  "receiver_transaction_bank_account_number": "bene_003",
+  "receiver_account": "bene_003",
   "tpp_name_ud": "tpp_Alpha",
   "device_fingerprint": "device_005",
   "amount_usd": 65.0

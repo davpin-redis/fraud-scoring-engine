@@ -64,7 +64,7 @@ public class SignalWriter {
     /** Returns {@code true} if this call updated the signals, {@code false} on a duplicate. */
     public boolean updateOnce(ScoreRequest request, ScoreResult result) {
         String cid = request.customerId();
-        String bene = request.receiverTransactionBankAccountNumber();
+        String bene = request.receiverAccount();
         Instant now = OffsetDateTime.parse(request.timestamp()).toInstant();
 
         String won = connection.sync().set(SignalKeys.guard(cid, request.transactionId()), "1",
@@ -93,17 +93,35 @@ public class SignalWriter {
         f.add(a.pfadd(senders, cid));
         f.add(a.expire(senders, SignalKeys.MONTH_BUCKET_TTL_SEC));
 
-        // Velocity + amount as TimeSeries (R017–R026: rate, baseline, cadence, dormancy,
-        // circadian, bust-out trend, device/payee surge). Series auto-create with 90d retention.
+        // Velocity / cadence / trend / surge as fixed-width bucket hashes with per-field TTL
+        // (R017–R026). Each HINCRBY targets the current time-bucket field; HEXPIRE bounds the
+        // hash to its window so the read reply stays constant-size regardless of history/rate.
         long nowMs = now.toEpochMilli();
-        f.add(SignalTimeSeries.add(a, SignalKeys.velocityTs(cid), nowMs, 1, SignalKeys.TS_RETENTION_MS, "SUM"));
-        f.add(SignalTimeSeries.add(a, SignalKeys.amountTs(cid), nowMs, amount, SignalKeys.TS_RETENTION_MS, "LAST"));
+        bumpBucket(a, f, SignalKeys.velocityHour(cid), nowMs, SignalKeys.VELH_BUCKET_MS, SignalKeys.VELH_TTL_SEC);
+        bumpBucket(a, f, SignalKeys.velocity5m(cid), nowMs, SignalKeys.VEL5_BUCKET_MS, SignalKeys.VEL5_TTL_SEC);
+
+        // Recent event timestamps (capped list, newest-first) — inter-arrival cadence (R022).
+        String ets = SignalKeys.recentEvents(cid);
+        f.add(a.lpush(ets, Long.toString(nowMs)));
+        f.add(a.ltrim(ets, 0, SignalKeys.EVENTS_CAP - 1));
+        f.add(a.expire(ets, SignalKeys.EVENTS_TTL_SEC));
+        // Last-event timestamp (long-lived) — dormant reactivation (R024).
+        f.add(a.set(SignalKeys.lastEventTs(cid), Long.toString(nowMs),
+                SetArgs.Builder.ex(SignalKeys.LAST_EVENT_TTL_SEC)));
+
+        // Weekly amount sum/count buckets — amount bust-out trend (R023).
+        String wk = Long.toString(SignalKeys.bucketStart(nowMs, SignalKeys.AMTW_BUCKET_MS));
+        f.add(a.hincrbyfloat(SignalKeys.amountWeekSum(cid), wk, amount));
+        f.add(a.hincrby(SignalKeys.amountWeekCount(cid), wk, 1));
+        f.add(a.hexpire(SignalKeys.amountWeekSum(cid), SignalKeys.AMTW_TTL_SEC, wk));
+        f.add(a.hexpire(SignalKeys.amountWeekCount(cid), SignalKeys.AMTW_TTL_SEC, wk));
+
         String device = request.deviceFingerprint();
         if (device != null && !device.isBlank()) {                // R025 device velocity surge (bot/ATO ring)
-            f.add(SignalTimeSeries.add(a, SignalKeys.deviceVelocityTs(device), nowMs, 1, SignalKeys.SURGE_RETENTION_MS, "SUM"));
+            bumpBucket(a, f, SignalKeys.deviceSurge5m(device), nowMs, SignalKeys.SURGE_BUCKET_MS, SignalKeys.SURGE_TTL_SEC);
         }
         if (bene != null && !bene.isBlank()) {                    // R026 payee inbound velocity surge (mule)
-            f.add(SignalTimeSeries.add(a, SignalKeys.beneVelocityTs(bene), nowMs, 1, SignalKeys.SURGE_RETENTION_MS, "SUM"));
+            bumpBucket(a, f, SignalKeys.beneSurge5m(bene), nowMs, SignalKeys.SURGE_BUCKET_MS, SignalKeys.SURGE_TTL_SEC);
         }
 
         String amt = SignalKeys.amountStatsMonth(cid, now);      // amount distribution (z-score)
@@ -115,5 +133,16 @@ public class SignalWriter {
         a.flushCommands();
         LettuceFutures.awaitAll(AWAIT_MS, TimeUnit.MILLISECONDS, f.toArray(new RedisFuture<?>[0]));
         return true;
+    }
+
+    /**
+     * Increments the current time-bucket field of a rollup hash and (re)sets that field's TTL
+     * to the window, so the hash self-trims to a bounded field count (Redis 8 {@code HEXPIRE}).
+     */
+    private static void bumpBucket(RedisAsyncCommands<String, String> a, List<RedisFuture<?>> f,
+                                   String key, long nowMs, long widthMs, long ttlSec) {
+        String field = Long.toString(SignalKeys.bucketStart(nowMs, widthMs));
+        f.add(a.hincrby(key, field, 1));
+        f.add(a.hexpire(key, ttlSec, field));
     }
 }

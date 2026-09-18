@@ -52,7 +52,7 @@ def ts(s):
 
 def build_dataset():
     txns = load_jsonl(os.path.join(TEST_DATA, "transactions", "historical_backfill.jsonl"))
-    benes = {b["receiver_transaction_bank_account_number"]: b
+    benes = {b["receiver_account"]: b
              for b in load_json(os.path.join(TEST_DATA, "reference", "beneficiaries.json"))}
     bl = load_json(os.path.join(TEST_DATA, "reference", "blacklists.json"))
     bad_accounts = set(bl["bl_accounts"])
@@ -65,7 +65,7 @@ def build_dataset():
     rows, labels = [], []
     for i, t in enumerate(txns):
         cid = t["customer_id"]
-        bene = t["receiver_transaction_bank_account_number"]
+        bene = t["receiver_account"]
         device = t["device_fingerprint"]
         now = t["_ts"]
 
@@ -73,10 +73,10 @@ def build_dataset():
         count_1h = sum(1 for p in prior
                        if p["customer_id"] == cid and 0 <= (now - p["_ts"]).total_seconds() <= 3600)
         distinct_24h = len({p["customer_id"] for p in prior
-                            if p["receiver_transaction_bank_account_number"] == bene
+                            if p["receiver_account"] == bene
                             and 0 <= (now - p["_ts"]).total_seconds() <= 86400})
         pair_90d = sum(1 for p in prior
-                       if p["customer_id"] == cid and p["receiver_transaction_bank_account_number"] == bene)
+                       if p["customer_id"] == cid and p["receiver_account"] == bene)
 
         bene_country = benes.get(bene, {}).get("country")
         cross_border = 1.0 if (bene_country and bene_country != t["customer_portfolio_country"]) else 0.0

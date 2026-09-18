@@ -23,21 +23,24 @@ Status: Draft — for review
 > - **Signal store** (Lettuce, `fraud.signal-store.uri`): 90d **approximate** signals —
 >   **HyperLogLog** (rotating monthly buckets) for distinct beneficiary fan-out (R013)
 >   and distinct-sender fan-in (R005), **counters** for repeat declines (R012),
->   **count/sum/sumsq** for the amount z-score (R018), and **RedisTimeSeries** for the
->   time-shaped behavioural signals — velocity vs baseline, sustained elevation,
->   circadian off-hour, machine cadence, amount bust-out trend, dormancy, per-device
->   velocity surge, and per-payee inbound velocity surge (R019–R026). Every TimeSeries key
->   is hash-tagged by a **high-cardinality** entity (`{cid}` / `{device}` / `{bene}`) so
->   writes and range-scans spread evenly across shards — no low-cardinality hot key (an
->   earlier per-country geo series was dropped because ~5 country keys concentrated all
->   traffic onto a handful of shards). TimeSeries is bundled in Redis 8 / Redis Enterprise
->   and driven from Lettuce via async `dispatch`. Bounded RAM, no search index, no flash.
+>   **count/sum/sumsq** for the amount z-score (R018), and **fixed-width bucket hashes
+>   with per-field TTL** (Redis 8 `HEXPIRE`) plus a **capped list** of recent event
+>   timestamps and a long-lived last-event marker for the time-shaped behavioural signals —
+>   velocity vs baseline, sustained elevation, circadian off-hour, machine cadence, amount
+>   bust-out trend, dormancy, per-device velocity surge, and per-payee inbound velocity
+>   surge (R019–R026). Each read returns a **bounded, constant number of fields** (window ÷
+>   bucket width, or the list cap), so egress per scoring call does not grow with run length
+>   or key hotness. Every key is hash-tagged by a **high-cardinality** entity (`{cid}` /
+>   `{device}` / `{bene}`) so load spreads evenly across shards — no low-cardinality hot key
+>   (an earlier per-country geo series was dropped for concentrating traffic onto ~4 shards).
+>   RedisTimeSeries is **no longer on the scoring path** (an earlier revision used it; raw
+>   `TS.RANGE` replies grew with sample volume). Bounded RAM, no search index, no flash.
 > - **Audit sink** (`TransactionSink`): every scored txn flows to a durable
 >   per-transaction "third store" — currently a `NoOpTransactionSink` placeholder.
 >
 > Hot-window signals are computed over **both** a 24h and a 90d window where it makes
 > sense. Rules: R012/R013/R005 (declines / fan-out / fan-in) + R014–R018 (24h declines,
-> 24h fan-out, 90d fan-in, 5-min velocity, amount z-score) + **R019–R026** (TimeSeries
+> 24h fan-out, 90d fan-in, 5-min velocity, amount z-score) + **R019–R026** (bucket-hash
 > behavioural: rate-vs-baseline spike, sustained elevation, circadian anomaly, machine
 > cadence, amount bust-out, dormant reactivation, device velocity surge, payee inbound
 > velocity surge). New-payee (R006)
@@ -122,7 +125,7 @@ The 30 ms p99 target is materially tighter than a typical fraud-scoring SLA (100
 
 - **1,000 TPS sustained** ≈ 86.4M transactions/day ≈ 31.5B/year at steady state. Design for a burst multiplier (recommend 3–5x, i.e. 3,000–5,000 TPS) to absorb traffic spikes (promotions, flash sales) without breaching the latency SLA — sustained-load capacity alone is not sufficient.
 - **10M customer accounts** sets the working-set size for account/card/device history that the Feature Service must keep "hot" (low-latency-reachable) at all times — this is not a dataset that can be paged in from cold storage within a 10 ms feature-assembly budget (see §3.3), so it needs to live in an in-memory or memory-tier store (e.g., Redis or a similar in-memory data store) rather than a disk-oriented database.
-- **Data volume:** the engine does **not** store individual transactions on the scoring path. The 90-day history that two rules used to scan is replaced by **streaming approximate signals** kept in a second RAM store (the **signal store**, §4.3, §7.12): HyperLogLog / counters / a stats hash + RedisTimeSeries, sized in the tens-to-~130 GB range for 5M customers (measured, §7.12) rather than the multi-TB a raw 90-day transaction log would need. Every scored transaction is still persisted in full to a durable **audit sink** (§4.2/§4.3) for audit and training, but that write is off the hot path and behind a pluggable interface, not a Redis Flex database the engine reads from. Both Redis stores stay fully in RAM.
+- **Data volume:** the engine does **not** store individual transactions on the scoring path. The 90-day history that two rules used to scan is replaced by **streaming approximate signals** kept in a second RAM store (the **signal store**, §4.3, §7.12): HyperLogLog / counters / a stats hash + fixed-width bucket hashes (with per-field TTL) + a capped event list, sized in the tens-of-GB range for 5M customers (measured, §7.12) rather than the multi-TB a raw 90-day transaction log would need. Every scored transaction is still persisted in full to a durable **audit sink** (§4.2/§4.3) for audit and training, but that write is off the hot path and behind a pluggable interface, not a Redis Flex database the engine reads from. Both Redis stores stay fully in RAM.
 - These figures are back-of-envelope planning inputs, not committed capacity numbers; they should be revisited once real traffic and record-size data are available.
 
 ---
@@ -158,7 +161,7 @@ A transaction is scored inline, before the payment is authorized:
 5. ML Scoring Service scores the feature vector, returning a fraud probability (0–1).
 6. Decision Engine combines rule signal and model score per the active policy, and maps the result to approve / review / decline using configured thresholds.
 7. Decision is returned synchronously to the caller.
-8. In parallel (fire-and-forget, does not block the response), three off-path writes run: (a) the feature store's rolling aggregates + 24h exact hot-window signals are updated (§7.9); (b) the signal store's 90-day approximate signals are updated (`SignalWriter` — HyperLogLog / counters / stats hash / TimeSeries, §7.12); (c) the full record — transaction, features, rule fires, model version, score, decision — is handed to the durable audit sink (`TransactionWriter`, §4.2/§4.3). The feature-store write is guarded by the idempotency key from §7.8 (`SET decision:{<customer_id>}:<transaction_id> ... NX`, co-located with the customer's keys) and the signal-store write by its own co-located `SET … NX` guard (`sig:seen:{<customer_id>}:<transaction_id>`): only the writer that wins the `NX` set applies the update, so a retried transaction is never double-counted into velocity/aggregates/signals.
+8. In parallel (fire-and-forget, does not block the response), three off-path writes run: (a) the feature store's rolling aggregates + 24h exact hot-window signals are updated (§7.9); (b) the signal store's 90-day approximate signals are updated (`SignalWriter` — HyperLogLog / counters / stats hash / fixed-width bucket hashes, §7.12); (c) the full record — transaction, features, rule fires, model version, score, decision — is handed to the durable audit sink (`TransactionWriter`, §4.2/§4.3). The feature-store write is guarded by the idempotency key from §7.8 (`SET decision:{<customer_id>}:<transaction_id> ... NX`, co-located with the customer's keys) and the signal-store write by its own co-located `SET … NX` guard (`sig:seen:{<customer_id>}:<transaction_id>`): only the writer that wins the `NX` set applies the update, so a retried transaction is never double-counted into velocity/aggregates/signals.
 
 *Step 8 is intentionally decoupled from the response path: persistence and signal updates must never add to caller-facing latency, but the audit write must not be lossy either (see §4.3 on durability).*
 
@@ -170,7 +173,7 @@ A 30 ms p99 budget at 1,000+ TPS sustained leaves very little room for anything 
 |---|---|---|
 | Request validation / routing | 2 ms | Gateway-level. |
 | Feature assembly | 10 ms | In-memory store only (Redis — §7); pre-aggregated velocity counters, not on-the-fly scans or joins against a disk-backed database. |
-| Signal-store read (§7.12) | (overlapped) | The 90-day approximate signals (R012/R013/R005/R016/R018 + the TimeSeries behavioural rules R019–R026, §8.1) are read from the signal store — `MGET`/`PFCOUNT`/`HMGET` and `TS.RANGE`/`TS.GET`, all pipelined. Run **concurrently** with feature assembly on a virtual thread (`SignalReader`), so it overlaps that 10 ms rather than adding to it. Every read is O(1)/O(bounded) against RAM (no search index, no SSD). It **degrades** (§3.5): on failure the signals fall back to safe defaults (`SignalReader.empty()`) and never block the response. |
+| Signal-store read (§7.12) | (overlapped) | The 90-day approximate signals (R012/R013/R005/R016/R018 + the behavioural rules R019–R026, §8.1) are read from the signal store — `MGET`/`PFCOUNT`/`HMGET`, `HGETALL` of the fixed-width bucket hashes, `LRANGE` of the capped event list, and a `GET` of the last-event marker — all pipelined. Run **concurrently** with feature assembly on a virtual thread (`SignalReader`), so it overlaps that 10 ms rather than adding to it. Every read returns a **bounded, constant field/element count** (window ÷ bucket width, or the list cap), so egress per call is flat regardless of history or key hotness. It **degrades** (§3.5): on failure the signals fall back to safe defaults (`SignalReader.empty()`) and never block the response. |
 | Rules evaluation | 2 ms | In-memory rule set. |
 | ML model inference | 10 ms | Single feature vector against a compiled/optimized in-process runtime (e.g., gradient-boosted trees exported to a fast native/ONNX runtime), invoked as a local call — no network hop (§3.6). |
 | Decision blending | 2 ms | Simple policy evaluation. |
@@ -251,7 +254,7 @@ The ML model (§8.2) is embedded in-process in the scoring engine rather than ru
 
 Persistence serves two distinct needs — real-time behavioural signals for scoring, and a durable record for audit/training — and each is met by a purpose-built path rather than one indexed transaction store:
 
-- **Signal store (RAM, on the scoring path)** — a **separate Redis database from the feature store** (§7.12) holding **90-day approximate** hot-window signals, maintained incrementally as each transaction is scored (`SignalWriter`) and read into the feature vector at scoring time (`SignalReader`). It uses **core Redis types only**: HyperLogLog for distinct fan-out (R013) and fan-in (R005/R016), counters for repeat declines (R012), a count/sum/sumsq hash for the amount z-score (R018), and **RedisTimeSeries** for the time-shaped behavioural rules (R019–R026). There is **no raw transaction history, no search index, and no flash** — the store is bounded by the number of active entities and their signal buckets, not by transaction volume, so it stays in the tens-to-~130 GB range for 5M customers (measured, §7.12) rather than the multi-TB a raw 90-day log would need. This is what replaced the earlier Redis Flex / Query-Engine transaction store, and it removes the Flex constraints (`ON HASH`/TAG-only/`SKIPINITIALSCAN`/no `FT.AGGREGATE`) that used to shape the design. Signals are keyed with high-cardinality hash tags (`{customer_id}` / `{device}` / `{bene}`) so load spreads evenly across shards (§7.12). Reads run concurrently with feature assembly and degrade to safe defaults on failure (§3.3, §3.5).
+- **Signal store (RAM, on the scoring path)** — a **separate Redis database from the feature store** (§7.12) holding **90-day approximate** hot-window signals, maintained incrementally as each transaction is scored (`SignalWriter`) and read into the feature vector at scoring time (`SignalReader`). It uses **core Redis types only**: HyperLogLog for distinct fan-out (R013) and fan-in (R005/R016), counters for repeat declines (R012), a count/sum/sumsq hash for the amount z-score (R018), and **fixed-width bucket hashes with per-field TTL** (Redis 8 `HEXPIRE`) — plus a capped list of recent event timestamps and a long-lived last-event marker — for the time-shaped behavioural rules (R019–R026). Each read returns a **bounded, constant number of fields**, so egress per call never grows with history or key hotness. There is **no raw transaction history, no search index, and no flash** — the store is bounded by the number of active entities and their fixed signal buckets, not by transaction volume, so it stays in the tens-of-GB range for 5M customers (measured, §7.12) rather than the multi-TB a raw 90-day log would need. This is what replaced the earlier Redis Flex / Query-Engine transaction store, and it removes the Flex constraints (`ON HASH`/TAG-only/`SKIPINITIALSCAN`/no `FT.AGGREGATE`) that used to shape the design. Signals are keyed with high-cardinality hash tags (`{customer_id}` / `{device}` / `{bene}`) so load spreads evenly across shards (§7.12). Reads run concurrently with feature assembly and degrade to safe defaults on failure (§3.3, §3.5).
 - **Audit sink (durable, off the scoring path)** — an append-only record of every scored transaction (the full §4.2 record), used for model training, offline analytics, and long-term audit/compliance retention. It is a pluggable `TransactionSink` interface written off the response path by `TransactionWriter` (with a bounded retry buffer, §3.5); the reference build ships a `NoOpTransactionSink` placeholder, adaptable to a durable log/queue or a data lake / warehouse (JSONL, Parquet, BigQuery, object storage). The engine **never reads it back** on the scoring path.
 - Note both of the above are distinct from the in-memory **feature store** (§3.1, §7), which holds current aggregated state (counters, recent behaviour summaries, and the 24h *exact* hot-window signals) for all customers, not raw transaction history.
 
@@ -287,7 +290,7 @@ subset; the rest are deferred.
 | Account history | `account_age_days` (new-account risk) | R011 |
 | Hot-window declines/fan-out — 24h **exact** (feature store) | `customer_declines_24h` (counter `c:{id}:declines:24h`), `customer_distinct_bene_24h` (Set `c:{id}:benes:24h`) — written idempotently in the customer Lua write | R014, R015 |
 | Hot-window signals — 90d **approximate** (signal store, §7.12) | `customer_declines_90d` (rotating counters), `customer_distinct_bene_90d` (HyperLogLog fan-out), `bene_distinct_senders_90d` (HyperLogLog fan-in), `amount_zscore_90d` (count/sum/sumsq hash) | R012, R013, R016, R018 |
-| Behavioural time-series (signal store, RedisTimeSeries, §7.12) | `customer_txn_rate_5m`/`_1h`, `velocity_ratio_1h`, `velocity_elevated_hours`, `hod_share_now`, `interarrival_cv`, `amount_trend`, `dormancy_days`, `device_surge`, `bene_surge` — velocity per-customer TS + amount per-customer TS + per-device and per-payee surge TS | R017, R019–R026 |
+| Behavioural rollups (signal store, fixed-width bucket hashes + capped list, §7.12) | `customer_txn_rate_5m`/`_1h`, `velocity_ratio_1h`, `velocity_elevated_hours`, `hod_share_now`, `interarrival_cv`, `amount_trend`, `dormancy_days`, `device_surge`, `bene_surge` — hourly/5-min velocity bucket hashes, weekly amount bucket hashes, per-device and per-payee 5-min surge hashes, a capped recent-events list (cadence), and a last-event marker (dormancy) | R017, R019–R026 |
 | Payment instrument risk / external reputation | blacklist membership (`bl:accounts`, `bl:devices`), watchlist | R001, R002, R008 |
 
 **Deferred / stubbed** (need master data or feeds not in the fixtures):
@@ -346,11 +349,11 @@ Rules and metrics are computed against several different entities, not just the 
 | Group-by key | Entity | Fraud use |
 |---|---|---|
 | `customer_id` | Customer (primary) | Per-customer velocity |
-| `receiver_transaction_bank_account_number` | Beneficiary account | Mule fan-in / bad-bene reuse |
-| `[customer_id, receiver_transaction_bank_account_number]` | Customer → beneficiary pair | New-payee / relationship velocity |
+| `receiver_account` | Beneficiary account | Mule fan-in / bad-bene reuse |
+| `[customer_id, receiver_account]` | Customer → beneficiary pair | New-payee / relationship velocity |
 | `customer_portfolio_country` | Geography | Cross-border, market cohort |
 | `tpp_name_ud` | TPP / third-party provider | Payee / merchant concentration |
-| `[receiver_transaction_bank_account_number, customer_portfolio_country]` | Beneficiary × country | Cross-border mule rings |
+| `[receiver_account, customer_portfolio_country]` | Beneficiary × country | Cross-border mule rings |
 | `[tpp_name_ud, customer_portfolio_country]` | TPP × country | Merchant risk by market |
 
 The same window and metric-type framework (§6.1–6.2) applies to every entity above — a `stddev` streaming aggregate over `last_24h` is computed identically whether it's grouped by `customer_id` or by `[tpp_name_ud, customer_portfolio_country]`; only the group-by key used to address the feature store changes (§7.3, §7.6).
@@ -500,9 +503,9 @@ This turns §7.11's directional notes into a concrete estimate for a **single re
 **Throughput check**
 
 - **Feature store**, estimated Redis commands per transaction: ~20 on the read path (feature assembly, §7.10) + ~30 on the write path (post-decision update fanning out across the 7 group-by entities, §7.9) ≈ **~50 commands/transaction**.
-- **Signal store** (separate cluster), per transaction: ~12 on the read path (`MGET` declines + 2× `PFCOUNT` + 4× `HMGET` amount stats + ~5 `TS.RANGE`/`TS.GET`, `SignalReader`) + ~10 on the write path (`SET NX` guard, `INCR`, 2× `PFADD`, 4× `TS.ADD`, 3× `HINCRBY*`, `SignalWriter`) ≈ **~22 commands/transaction**, all pipelined.
+- **Signal store** (separate cluster), per transaction: ~13 on the read path (`MGET` declines + 2× `PFCOUNT` + 4× `HMGET` amount stats + 4× `HGETALL` bucket hashes + `LRANGE` events + `GET` last-event, `SignalReader`) + ~16 on the write path (`SET NX` guard, `INCR`, 2× `PFADD`, `HINCRBY`+`HEXPIRE` per bucket hash, `LPUSH`+`LTRIM`, `SET` last-event, 3× `HINCRBY*` z-score, `SignalWriter`) ≈ **~25–30 commands/transaction**, all pipelined. Each `HGETALL` reply is bounded by the window ÷ bucket width (≤ ~170 hourly, ≤ 72 surge), so egress is constant.
 - At 1,000 TPS sustained → ~50K ops/sec (feature) + ~22K ops/sec (signal); at 3,000–5,000 TPS burst (§2.3) → up to ~250K + ~110K ops/sec.
-- Both clusters are comfortably below what even a modest shard count can serve — at this customer/TPS ratio each is **memory-bound, not throughput-bound**: shard count is driven by the memory estimates, which then provide far more aggregate ops/sec capacity than needed. The one caveat is **key skew**: signal-store TimeSeries keys must be hash-tagged by a high-cardinality entity (`{customer_id}`/`{device}`/`{bene}`) so no single shard becomes a hot spot (an earlier low-cardinality per-country series concentrated load onto ~4 shards — see the change record at the top and §10.1).
+- Both clusters are comfortably below what even a modest shard count can serve — at this customer/TPS ratio each is **memory-bound, not throughput-bound**: shard count is driven by the memory estimates, which then provide far more aggregate ops/sec capacity than needed. The one caveat is **key skew**: signal-store rollup keys must be hash-tagged by a high-cardinality entity (`{customer_id}`/`{device}`/`{bene}`) so no single shard becomes a hot spot (an earlier low-cardinality per-country series concentrated load onto ~4 shards — see the change record at the top and §10.1).
 
 **Recommended topology (Redis Enterprise Software, per region)**
 
@@ -512,8 +515,8 @@ This turns §7.11's directional notes into a concrete estimate for a **single re
 | Node memory | ~512 GB RAM per node (~450 GB usable after Redis Enterprise's reserved overhead) | 6 × 450 GB ≈ 2.7 TB usable cluster capacity against a ~900 GB target — roughly 3x headroom for growth, replica overhead, and uneven shard placement. |
 | Feature-store database (BDB) | ~40 primary shards, ~20–25 GB each | Redis Enterprise's commonly cited shard-size ceiling for fast failover/rebalance; 40 shards on the ~900 GB estimate keeps individual shards well under that ceiling. |
 | Replication | Replica-per-shard (factor 2), replica placed on a different node than its primary | Standard Redis Enterprise HA; ~1.8 TB total RAM footprint (primary + replica) fits within the 2.7 TB usable capacity. |
-| Separate signal-store BDB | 90-day **approximate** hot-window signals (§4.3, §7.12): HyperLogLog (fan-out/fan-in), rotating monthly counters (declines), a count/sum/sumsq hash (amount z-score), and **RedisTimeSeries** (velocity + behavioural rules R019–R026). **RAM-only, no flash, no search index.** Measured (docker-compose): non-TS signals ~355 B/customer (~1.8 GB at 5M); per-customer velocity TS ~4.4 KB + amount TS ~12.7 KB/series (~88 GB at 5M); device/payee surge TS use a short 2-day retention so they add only ~1–2 GB. → **~90–95 GB** total at 5M customers. | A second RAM Redis cluster, sized independently of the feature store. Keys are hash-tagged by high-cardinality entities so shards stay balanced. Blacklists/membership/cached-decisions/config stay in the feature BDB. |
-| Modules | RedisBloom (blacklists, §7.7); **RedisTimeSeries** (signal store, §4.3). | Both bundled into core Redis 8 / Redis Enterprise — no separate install. The old Query Engine / search module is no longer required (the transaction store was removed). |
+| Separate signal-store BDB | 90-day **approximate** hot-window signals (§4.3, §7.12): HyperLogLog (fan-out/fan-in), rotating monthly counters (declines), a count/sum/sumsq hash (amount z-score), and **fixed-width bucket hashes with per-field TTL** (velocity/amount/surge) + a capped event list + last-event marker for the behavioural rules R019–R026. **RAM-only, no flash, no search index, no modules.** Each per-entity structure is bounded (≤ ~170 hourly + ≤ 24 5-min + ≤ 72 surge + ≤ 8 weekly fields + ≤ 64-element list), so the footprint is ~1–3 KB/active customer → **well under 20 GB** at 5M customers plus the ~1.8 GB non-bucket signals. | A second RAM Redis cluster, sized independently of the feature store. Keys are hash-tagged by high-cardinality entities so shards stay balanced. Blacklists/membership/cached-decisions/config stay in the feature BDB. |
+| Modules | RedisBloom (blacklists, §7.7). | Bundled into core Redis 8 / Redis Enterprise. The signal store needs **no modules** — behavioural signals use core hashes with per-field TTL (`HEXPIRE`, Redis 7.4+/8). The old Query Engine / search module (transaction store) and RedisTimeSeries are no longer required. |
 | Persistence | AOF (`appendfsync everysec`) + periodic RDB snapshot on both stores | Fast recovery after a node event; not the *sole* durability guarantee — feature/signal state is derivable and can be rebuilt (feature aggregates via the write path §7.9; signals re-warm from live traffic), and the durable audit sink (§4.3) is the system of record. |
 | Auto Tiering (Redis Flash) | **Neither store.** | Both the feature working set and the signal set must stay fully in RAM to meet the 10 ms budget (§3.3); with the multi-TB transaction store removed there is no longer any flash-tiered database in the design. |
 | Active-Active (CRDB) | **Not used** | Each region is an independent, isolated deployment by design (§3.4) — there is no cross-region replication to support. |
@@ -543,18 +546,18 @@ The rules engine evaluates a configurable, ordered set of deterministic rules. R
 | **R012** repeat declines 90d | soft (0.4) | `customer_declines_90d >= 3` | signal-store rotating monthly counters (`MGET` + sum) |
 | **R013** beneficiary fan-out 90d | soft (0.35) | `customer_distinct_bene_90d > 15` | signal-store HyperLogLog `PFCOUNT` (distinct benes) |
 | **R016** mule fan-in 90d | soft (0.4) | `bene_distinct_senders_90d > 30` | signal-store HyperLogLog `PFCOUNT` (distinct senders per payee) |
-| **R017** velocity burst 5m | soft (0.4) | `customer_txn_rate_5m > 5` | signal-store velocity TimeSeries (`TS.RANGE`, recent count) |
+| **R017** velocity burst 5m | soft (0.4) | `customer_txn_rate_5m > 5` | 5-min velocity bucket hash `sig:c:{id}:v5` (`HGETALL`, current-bucket count) |
 | **R018** amount anomaly 90d | soft (0.4) | `amount_zscore_90d > 3` | signal-store count/sum/sumsq hash (z-score) |
-| **R019** velocity spike vs baseline | soft (0.45) | `velocity_ratio_1h > 8` | velocity TS, current-1h vs mean hourly baseline |
-| **R020** sustained elevation | soft (0.4) | `velocity_elevated_hours >= 4` | velocity TS, hours above 2× baseline in last 6h |
-| **R021** off-hour activity | soft (0.3) | `hod_share_now < 0.01` | velocity TS, this hour-of-day's historical share |
-| **R022** machine cadence | soft (0.4) | `interarrival_cv < 0.15` | velocity TS, coefficient of variation of inter-arrival gaps |
-| **R023** amount bust-out | soft (0.45) | `amount_trend > 0.15` | amount TS, weekly-average upward trend |
-| **R024** dormant reactivation | soft (0.35) | `dormancy_days > 60` | velocity TS, gap since last event |
-| **R025** device velocity surge | soft (0.4) | `device_surge > 5` | per-**device** velocity TS `sig:dev:{device}:vel` (2-day retention) |
-| **R026** payee inbound velocity surge | soft (0.4) | `bene_surge > 5` | per-**payee** velocity TS `sig:b:{bene}:vel` (2-day retention) |
+| **R019** velocity spike vs baseline | soft (0.45) | `velocity_ratio_1h > 8` | hourly velocity bucket hash `sig:c:{id}:vh`, current-1h vs mean hourly baseline |
+| **R020** sustained elevation | soft (0.4) | `velocity_elevated_hours >= 4` | hourly bucket hash `vh`, hours above 2× baseline in last 6h |
+| **R021** off-hour activity | soft (0.3) | `hod_share_now < 0.01` | hourly bucket hash `vh`, this hour-of-day's historical share |
+| **R022** machine cadence | soft (0.4) | `interarrival_cv < 0.15` | capped recent-events list `sig:c:{id}:ets`, CV of inter-arrival gaps |
+| **R023** amount bust-out | soft (0.45) | `amount_trend > 0.15` | weekly amount bucket hashes `sig:c:{id}:aws`/`:awc`, per-week average trend |
+| **R024** dormant reactivation | soft (0.35) | `dormancy_days > 60` | last-event marker `sig:c:{id}:lts` (`GET`), gap since last event |
+| **R025** device velocity surge | soft (0.4) | `device_surge > 5` | per-**device** 5-min bucket hash `sig:dev:{device}:s5` (current 5m vs 6h mean) |
+| **R026** payee inbound velocity surge | soft (0.4) | `bene_surge > 5` | per-**payee** 5-min bucket hash `sig:b:{bene}:s5` (current 5m vs 6h mean) |
 
-The velocity/amount TimeSeries are keyed per customer (`sig:c:{id}:vel`, `:amt:ts`); the surge series are keyed per device / per payee — all **high-cardinality** hash tags, so writes and range-scans spread across shards. TimeSeries is bundled in Redis 8 / Redis Enterprise and driven from Lettuce via async `dispatch` (`SignalTimeSeries`). New-payee (R006) still uses the existing customer→beneficiary pair state.
+All behavioural rollups are **fixed-width bucket hashes** (field = bucket-start ms, value = a counter/sum) with **per-field TTL** (Redis 8 `HEXPIRE`), so each hash self-trims to a bounded field count (window ÷ bucket width) and a read (`HGETALL`) returns a **constant-size** reply regardless of how many transactions the entity has accumulated — a hot key returns the same bytes as a quiet one. Writes are O(1) (`HINCRBY` + `HEXPIRE` on the current bucket). Cadence (R022) uses a capped list of recent event timestamps (`LPUSH`+`LTRIM`), and dormancy (R024) a long-lived last-event marker. Keys are hash-tagged per customer / device / payee — all **high-cardinality** — so load spreads across shards. RedisTimeSeries is no longer used on the scoring path (raw `TS.RANGE` replies grew with sample volume, inflating egress and tail latency under soak). New-payee (R006) still uses the existing customer→beneficiary pair state.
 
 ### 8.2 Machine Learning Model
 
@@ -585,12 +588,65 @@ The Decision Engine combines rule outcomes and the model score into a single fin
 
 ### 8.4 Feedback Loop
 
+The system improves over time by turning outcomes back into better decisions. This is
+organised as **two tracks** on a shared data foundation: a near-term **closed-loop feedback**
+track (Track A) that retrains a lightweight classifier and reacts to confirmed fraud, and a
+strategic **learned event-sequence representation** track (Track B) that adds a self-supervised
+embedding of each user's history. Track A is CPU-only and is the prerequisite; Track B is a
+GPU-dependent upgrade layered on the same foundation.
+
 Ground-truth labels arrive after the fact, from two main sources:
 
-- **Chargebacks** — arrive from the payment processor, typically 1–90+ days after the transaction; a strong but delayed and imperfect fraud signal (chargebacks also occur for non-fraud disputes).
-- **Manual review outcomes** — analysts reviewing "review"-bucket transactions produce a faster, more direct fraud/not-fraud label, usually within hours to days.
+- **Chargebacks** — from the payment processor, typically 1–90+ days after the transaction; strong but delayed and imperfect (chargebacks also occur for non-fraud disputes).
+- **Manual review outcomes** — analysts reviewing "review"-bucket transactions give a faster, more direct label, usually within hours to days.
 
-Labels are attached to the original transaction record (see `outcome_label` field, §4.2). The training pipeline runs on a regular cadence (e.g., weekly) to incorporate newly labeled data, evaluate the candidate model against the current production model on a held-out set, and promote it if it improves target metrics without regressing others.
+Crucially, **some transactions the engine *approved* are later confirmed fraudulent** — these false negatives are the highest-value training signal, and catching their repeats is where most near-term loss reduction comes from.
+
+#### 8.4.1 Data foundation — event transport and durable history
+
+- **Event transport (bounded):** each scored transaction is appended to a **Redis Stream** (`XADD txn:events * …`) trimmed with **`MAXLEN ~ <N>`** (or by `MINID` to a few hours). The stream is a **buffered pipe, never the archive** — its RAM stays flat regardless of volume. Consumers read via **consumer groups** (`XREADGROUP`+`XACK`), each group seeing every event and load-balancing across its own members; entries are trimmed only once durably persisted downstream. The engine's feature-store and signal-store writes are **not** stream consumers — they remain the engine's direct off-path writes; the `XADD` is the third off-path write, carrying only the scored-transaction event.
+  - **Near-term (Track A only) there is exactly one consumer group: the Parquet writer.** Track A's trainer reads Parquet *offline*, not the stream. The **embedding service (Track B) is the second consumer group**, added later.
+- **Labels are a separate ingress, not this stream.** Chargeback / manual-review outcomes arrive on their own path and land in the label store keyed by `transaction_id`; the `txn:events` stream carries only the scored events.
+- **Durable history (system of record):** the `TransactionSink` (§4.3, currently `NoOpTransactionSink`) writes the full record — including the point-in-time `featureSnapshotJson` — to **date-partitioned Parquet** (swappable for a warehouse). This, not Redis, holds the complete transaction history used for training and audit. **Single writer, many readers:** only the Parquet writer *writes* (avoids concurrent-write/compaction coordination); the Track A trainer, the eval/backtest harness, the Track B embedding backfill, and analytics all *read* the shared store.
+- **Label store:** confirmed outcomes are attached to the original record by `transaction_id` (`label`, `source`, `labeled_at`), with a **maturation window** (e.g. 60–90 days) before an un-charged-back transaction is treated as `confirmed_legit`, so recent transactions are never labelled legit prematurely.
+
+#### 8.4.2 Track A — Closed-loop feedback (near-term, CPU-only)
+
+Two speeds:
+
+- **Fast loop (seconds–minutes) — reactive containment.** On a confirmed fraud, immediately push the implicated entities (beneficiary account, device, TPP) to `bl:accounts`/`bl:devices`/watchlist and bump signal counters, then fire `cfg:invalidate` (§7.2) so every engine catches repeats of the same ring on the next transaction — **no retrain**, reusing R001/R002/R008. Guard auto-actions with confidence thresholds, magnitude caps, and expiry to resist poisoning.
+- **Slow loop (daily/weekly) — statistical learning.** Join matured labels to the **point-in-time feature snapshots** and retrain a **CPU gradient-boosted model** (LightGBM/XGBoost) or the existing logistic `LinearModelScorer`, behind the existing `ModelScorer` interface. Promote via champion/challenger (§8.4.4). Decision-band thresholds are re-calibrated against the £-cost target on the same cadence (move the bands into `cfg` so they hot-reload like rules).
+
+No foundation model is required for this track — training on the persisted engineered feature vector is fast on CPU and keeps the demonstrated variable (the feedback loop) uncoupled from any heavy new representation.
+
+#### 8.4.3 Track B — Learned event-sequence representation (strategic, GPU-dependent)
+
+A **separate embedding service** (bounded context; not in the JVM engine) consumes the `txn:events` stream, encodes each user's recent event history with a self-supervised **PRAGMA-style encoder** (masked-modelling, key–value–time tokenisation), and writes a **cached per-user embedding** `emb:{cid}` (a versioned vector) into the signal store. The engine reads that vector on the hot path with a plain `GET` and feeds `concat(engineered signals, embedding)` to the in-engine head — it **never calls the embedding service inline** and degrades to engineered signals if the vector is missing/stale (the PRAGMA staleness result, arXiv 2604.08649 §3.4.2, shows slight staleness costs <0.2% precision/recall).
+
+- **Scaling the embedding service** (it is the heavy component, but off the hot path with a seconds-scale budget):
+  - **Debounce/coalesce — the biggest lever:** recompute a user at most every *K* events or *N* minutes (a per-user "last-embedded" marker / dirty-set), so a burst for one hot user collapses into a single recompute and effective embedding QPS is far below the 1,000 tx/s ingest rate.
+  - **Horizontal replicas** in the consumer group (Redis load-balances entries across members); **shard by `cid`** so one user's recomputes serialise on one worker (no racy double-writes to `emb:{cid}`, better cache locality).
+  - **Batch inference** (Triton dynamic batching / app-level micro-batching) and **cap sequence length** (PRAGMA subsamples >6,500 events, keeps most recent) to bound per-inference cost.
+  - **Prioritise & shed:** embed active/high-risk users first; let dormant users' vectors age (staleness tolerated). If the service falls behind, the bounded stream + debounce shed redundant work and embeddings just get staler — the engine degrades gracefully.
+  - **Separate the one-off backfill** (embed all users from Parquet) from the steady online updater; scale them independently.
+- **CPU-only feasibility — separate *serving* from *pre-training*:**
+  - **Serving on CPU: yes.** `pragmatiq` is CPU-first for inference; a small model (nano/S) + ONNX/int8 + debounce + batching serves fine on CPU. LoRA fine-tuning and the linear/embedding-probe head are also CPU-friendly.
+  - **Pre-training on CPU: PoC only.** `pragmatiq` ships **no pretrained weights** and its schema differs from ours, so the backbone must be pre-trained at least once; the from-scratch MLM step is the one GPU-hungry part. On CPU you can pre-train a **nano preset on a reduced corpus** (hours–days) to demonstrate the mechanism, but production-grade embeddings and periodic drift re-pre-training want GPUs.
+- **Train once, reuse many (demo model artifact):** pre-training is a **one-off offline step**, not part of any demo run. Train the backbone once and persist a **versioned artifact** — backbone checkpoint (+ ONNX/quantized export), tokeniser/vocab + feature-encoding config, and a version tag — in a model registry / object store (not committed to git as a large binary). Every demo *loads* that artifact; it never re-pre-trains. **Freeze the backbone, vary the head:** the label-free backbone is task-agnostic and reused across all demos, while the cheap classifier head is what the feedback loop retrains (seconds–minutes on CPU) to show the before/after lift. Because embeddings depend only on the frozen backbone + user history, **precompute `emb:{cid}` for the demo cohort once** and cache the vectors — a demo then starts instantly (load head, read cached embeddings, run the feedback step) and is deterministic (pin artifact version, fix seeds, snapshot the dataset). Only a backbone **re-pre-train** invalidates the cache (version bump + re-embed) — deliberately out of scope for demos.
+- **Versioning (critical):** embeddings are meaningless across backbone versions. Couple `(backbone, head)` versions atomically, stamp the version on each `emb:{cid}` vector, run a re-embed/backfill on backbone change, and have the engine check version compatibility.
+
+#### 8.4.4 Demonstrating that the loop increases fraud detection *and* reduces false positives
+
+**Key constraint:** recall and precision cannot both rise by re-thresholding — that is a pure trade-off. They improve **together only if the feedback improves *discrimination*** (pushes the PR/ROC curve outward), i.e. the loop teaches the model something it did not previously know. A convincing test therefore requires:
+
+1. **An actuator** — the loop must change a decision surface (retrain the head, add a signal, adjust weights/thresholds, or blacklist), not merely accumulate labels.
+2. **A frozen champion vs a post-feedback challenger**, scored on the **same temporally-later holdout**, compared at a **fixed operating point** (recall @ fixed decline-rate; precision @ fixed recall) plus PR-AUC and the £-view (fraud £ caught vs false-decline £).
+3. **Point-in-time features + matured labels** (no leakage; train past → test future, never shuffle).
+4. **A scenario engineered so both *can* improve:** a fraud modus operandi the baseline both *misses* (false negatives) and only catches via a **blunt rule that also false-positives on look-alike legit** (e.g. a mule/device-farm pattern where the baseline leans on a crude `device_distinct_customers > 2` that also flags shared family devices). After feedback teaches the sharper combination (device fan-out × new-payee × velocity/surge), the challenger catches the missed mules (**recall ↑**) *and* the crude rule can be relaxed so the look-alike legit clear (**false positives ↓**).
+5. **Sufficient labelled volume** of that pattern, both classes, with imbalance handling.
+6. **Selective-labelling honesty:** labels exist only for *approved* transactions, so anchor the demo on the **approved-but-fraud → caught-next-time** story (unbiased for that pattern); an **exploration slice** (a small, risk-capped random pass-through of would-be-declines) is what de-biases the declined side in production.
+
+Every automated decision must remain explainable and auditable (§9): keep a versioned model registry, stamp `modelVersion` on every record (already done), and gate model/threshold promotion behind approval.
 
 ---
 
@@ -614,7 +670,7 @@ Labels are attached to the original transaction record (see `outcome_label` fiel
 - Throughput and error rates per component.
 - Fallback/degraded-mode activation frequency (see §3.5).
 - Redis feature-store health: memory usage per key category (§7.11), hit rate, hot-key/shard imbalance (particularly for high-cardinality composites like the customer×bene pair).
-- Redis signal-store health: per-shard CPU and memory, and **hot-key/shard imbalance** in particular — the behavioural signals live on shared TimeSeries/HyperLogLog keys, so a low-cardinality hash tag would concentrate load onto a few shards (as an earlier per-country velocity series did). Alert on skewed per-shard CPU; signal keys are deliberately tagged by high-cardinality entities (`{customer_id}`/`{device}`/`{bene}`) to keep the distribution flat (§7.12).
+- Redis signal-store health: per-shard CPU and memory, and **hot-key/shard imbalance** in particular — the behavioural signals live on shared bucket-hash / HyperLogLog keys, so a low-cardinality hash tag would concentrate load onto a few shards (as an earlier per-country velocity series did). Alert on skewed per-shard CPU; signal keys are deliberately tagged by high-cardinality entities (`{customer_id}`/`{device}`/`{bene}`) to keep the distribution flat (§7.12). Egress per call is bounded by design (fixed bucket-hash field counts), so a rising signal-store reply size or per-call latency under steady load is itself an alert-worthy regression.
 
 ### 10.2 Model & Business Metrics
 
@@ -625,6 +681,20 @@ Labels are attached to the original transaction record (see `outcome_label` fiel
 - Fraud loss rate (confirmed fraud that was approved) — the primary business cost the system exists to reduce.
 - Per-rule fire rate and precision, to identify stale or noisy rules.
 
+### 10.3 Real-time Feedback Dashboard
+
+A live view of the continuous-learning effect (§8.4) — **fraud detection going up and false positives going down** as the feedback loop is applied. Its defining requirement is that the figures are **aggregated across every engine instance**, not read per-instance from `/actuator`.
+
+**Why not sum the actuator endpoints.** The engine's Micrometer/`/actuator/prometheus` counters are per-instance and reset on restart; instances autoscale in and out. Summing them in the UI is fragile, and more fundamentally the actuator only knows each instance's *decisions*, not whether they were *correct* — recall/precision/FP-rate need labels, which resolve out-of-band (§8.4.1).
+
+**Cross-instance aggregation (Redis-backed).** Every engine appends its decision to the shared `txn:events` Redis Stream (§8.4.1). A small **metrics aggregator** joins those decisions with the label store and maintains **global confusion counters in Redis** — `metrics:{modelVersion}:{minute}` → `tp/fp/fn/tn` — from which it derives recall, precision, FP-rate, and the £ view (fraud £ caught vs false-decline £). Because all engines write to one stream and the counters live in one Redis, the numbers are cluster-wide by construction and survive restarts/autoscaling. The aggregator exposes an SSE endpoint (`/metrics/fraud/stream`, ~1 s frames) that the dashboard consumes; it is stateless (reads the shared counters). *(Production-ops alternative: Prometheus scrapes all instances + Grafana — but recall/precision still need a labelled-outcome exporter fed from this same eval layer.)*
+
+**What it shows.** Headline tiles for **fraud detection rate (recall)** and **false-positive rate** with deltas; two live time-series (challenger solid vs champion dashed) with a **"feedback applied" annotation** at the moment a challenger is promoted / rules are reloaded (`cfg:invalidate`) — the inflection where recall steps up and FP-rate steps down is the headline of the demo. A **champion-vs-challenger operating-point** panel shows both metrics improving on the *same* labelled holdout, which is what makes the claim credible (both improve only via better *discrimination*, not re-thresholding — §8.4.4). Throughput and the contributing-instance count convey the cross-instance aggregation.
+
+**Label-latency caveat.** Recall/precision/FP-rate are exact in real time only because the test supplies labels immediately (seeded scenario + approved-but-fraud marks). In production these lag (chargebacks days later), so the same panels show a *maturing* metric; the review-queue labels give a faster proxy.
+
+**Reference build.** `feedback_dashboard_mockup.html` is a self-contained, Redis-themed page (SSE ~1 s) that ships against a **simulated feed** (`USE_SIMULATION=true`) so the UI and wiring are ready before Track A's label pipeline lands; flip the flag to consume the real aggregator's SSE. It reuses the theme and structure of the load-test dashboard (§13.5) but is a distinct view (fraud *quality* over time, not load-test throughput/latency).
+
 ---
 
 ## 11. Tradeoffs & Alternatives Considered
@@ -634,7 +704,8 @@ Labels are attached to the original transaction record (see `outcome_label` fiel
 | Synchronous scoring in the auth path | Async scoring, approve-then-reverse | Blocking bad transactions before funds move is far cheaper than clawing back after the fact; the business explicitly wants real-time blocking. |
 | Gradient-boosted trees for the ML model | Deep neural network / sequence model | GBTs offer strong tabular performance, fast CPU inference, and easier feature-importance explainability; a sequence model is a reasonable future upgrade once rich behavioral/session-sequence data is available. |
 | Hybrid rules + ML | ML-only scoring | Hard rules give instant, fully explainable control for known-bad patterns (sanctions lists, confirmed fraud rings) that risk ops can change without a retrain; soft signals fold into the model as features for joint calibration, with a thin live override layer (§8.3) preserving fast reaction between retrains. |
-| Streaming approximate signals in RAM (HyperLogLog / counters / stats hash / TimeSeries) | Storing every transaction in an indexed 90-day store (the earlier Redis Flex + Query-Engine design) and counting via `FT.SEARCH` at scoring time | The scoring path only needs *aggregate* answers (how many declines, how many distinct payees, current velocity vs baseline), not the raw rows. Maintaining those incrementally is bounded by active-entity count (tens-to-~130 GB, all RAM) instead of transaction volume (multi-TB on flash), removes the Flex Query-Engine constraints, and keeps every read O(1)/O(bounded). The cost is approximation (HyperLogLog ~0.8% error) and that a brand-new signal needs history to warm — both acceptable for these rules. |
+| Streaming approximate signals in RAM (HyperLogLog / counters / stats hash / fixed-width bucket hashes) | Storing every transaction in an indexed 90-day store (the earlier Redis Flex + Query-Engine design) and counting via `FT.SEARCH` at scoring time | The scoring path only needs *aggregate* answers (how many declines, how many distinct payees, current velocity vs baseline), not the raw rows. Maintaining those incrementally is bounded by active-entity count (tens of GB, all RAM) instead of transaction volume (multi-TB on flash), removes the Flex Query-Engine constraints, and keeps every read O(1)/O(bounded). The cost is approximation (HyperLogLog ~0.8% error) and that a brand-new signal needs history to warm — both acceptable for these rules. |
+| Fixed-width bucket hashes with per-field TTL (`HEXPIRE`) for the time-shaped signals | RedisTimeSeries (`TS.ADD`/`TS.RANGE`) — used in an earlier revision | A raw `TS.RANGE` reply grows with the number of samples in the window, so a hot key's read ballooned egress and tail latency over a soak. Reducing each signal to a fixed-width bucket hash (counts/sums per time bucket) makes the reply a **constant field count** — the reduction the rules perform anyway happens at write time, and a hot key returns the same bytes as a quiet one. Same thresholds/intent; the only statistic changed is inter-arrival CV (now over the last ≤64 events, still bounded). |
 | Durable audit sink behind a pluggable interface, off the scoring path | An indexed transaction store the engine reads back on the hot path | The full record is still needed for audit/training, but nothing about a transaction's own record feeds scoring — so persistence can be a fire-and-forget durable write (log/queue/warehouse) with no index and no read-back, keeping it off the latency budget entirely. |
 | Fail-open to rules-only on ML outage | Fail closed (decline everything) on ML outage | Blocking all payments during an infrastructure blip causes direct, immediate revenue loss and customer harm that likely exceeds the fraud risk of a temporary rules-only mode. |
 | In-memory feature store (Redis) for all customer/entity aggregates | Disk-backed key-value store (e.g., a managed NoSQL database) | A 10 ms feature-assembly budget at 10M accounts / 1,000+ TPS requires memory-speed reads; disk-backed stores' typical single- to double-digit ms p99, plus network/disk tail latency, leave no margin for the rest of the request. |
@@ -695,7 +766,7 @@ Two parallel Python seeders (`test_data/`) do this and are the load-test critica
 - **`seed_feature_store.py`** — writes per-customer profile, aggregate buckets, ring buffer, and the 24h exact signals for the target customer count. Multiprocessing (`--procs`), sharded by `--customer-start`/`--total-customers` so several instances on separate VMs seed disjoint ranges concurrently; `--days` controls history depth and `--id-width` the id zero-padding.
 - **`seed_signal_store.py`** — pre-warms the distinct/count/amount signals (R005/R012/R013/R016/R018) as HyperLogLog / counters / stats hashes, with a `--flagged` slice of high-risk customers (≥3 declines, >15 distinct beneficiaries, high fan-in) so the bundled Gatling feeder trips those rules out of the box. Also parallel and shardable.
 
-The **behavioural TimeSeries signals (R017, R019–R026)** are deliberately **not** pre-seeded — they build up live as the engine scores during the run, and by design need history to accumulate before they engage (the surge series in particular use a 2-day retention). See `LOAD_TEST_RUNBOOK.md` for the exact 5M-customer / 1,000-TPS seeding commands and GCP sizing.
+The **behavioural bucket-hash signals (R017, R019–R026)** are deliberately **not** pre-seeded — they build up live as the engine scores during the run, and by design need history to accumulate before they engage (the surge and velocity buckets carry short field TTLs). See `LOAD_TEST_RUNBOOK.md` for the exact 5M-customer / 1,000-TPS seeding commands and GCP sizing.
 
 ### 13.3 Gatling Load Test Design
 
@@ -733,3 +804,66 @@ A live view is needed while a test is running — not just the static HTML repor
 - **Scope:** this view is specific to an active test run in the dedicated test environment (§13.4); it is not the production monitoring dashboard (§10), though it deliberately reuses the same metric definitions so a number that looks fine in testing means the same thing in production.
 
 A working mockup of this dashboard, with simulated live data matching the fields above, is in [`load_test_dashboard_mockup.html`](load_test_dashboard_mockup.html) — a self-contained HTML file (open it in any browser; the Redis UI theme and fonts are inlined). It drives every displayed field from a 1s live simulation and exposes the five §13.3 scenarios as tabs; the p99 readout and its chart line turn Hyper Red when latency crosses the 30 ms target, which the burst and failure-injection scenarios exercise.
+
+### 13.6 Simulation & Feedback-Loop Test Data (two scales)
+
+The continuous-learning work (§8.4) must be *demonstrated*, not asserted — a run where **fraud detection rises and false positives fall the longer it runs** (§10.3 dashboard). That requires purpose-built simulation data. The design uses **one parameterised generator with two presets**, so the small set is a faithful scale-down of the large one and a green small-scale result predicts large-scale behaviour:
+
+- **Small (laptop / CI):** fast, deterministic, single Redis container; drives correctness and an automated **learning-curve assertion**.
+- **Large (distributed):** the usual **5M customers / 1,000 tx/s** on GCP; drives the scale/perf validation and the **live cross-instance dashboard demo**.
+
+#### 13.6.1 Why it improves over time (and the honesty constraint)
+
+Improvement is driven by two independent engines, and the data must feed both:
+
+1. **A statistical learning curve (the model).** Fraud is rare, so the classifier under-detects early; as matured labels (§8.4.1) accrue each round the minority class is better estimated → recall and precision rise and plateau. Real and well-understood *provided the fraud signature is learnable from the features and stationary across the run*.
+2. **Deterministic containment (the fast loop, §8.4.2).** Confirmed-fraud entities (mule beneficiary, farm device) are blacklisted; because the simulated fraud **reuses entities across rounds** (rings), every newly-confirmed entity is caught thereafter — a monotonic boost independent of the model.
+
+**Non-negotiable constraint:** recall and precision rise *together* only if discrimination improves (§8.4.4), so the data must contain **look-alike legit** that a blunt baseline rule false-positives on, and the fraud must carry a **joint (multi-feature) signature** the model learns to separate from them. Without look-alikes the run can only trade recall for precision.
+
+#### 13.6.2 The two presets
+
+| Dimension | Small (laptop / CI) | Large (distributed, prod-scale) |
+|---|---|---|
+| Customers | ~5,000 | 5,000,000 |
+| Beneficiaries (incl. mules) | ~1,000 (50 mules) | ~1,000,000 (~20k mules) |
+| Devices (incl. farm) | ~4,000 (15 farm) | ~7,500,000 (few-thousand farm) |
+| Warm-start backfill | ~30d, ~150k txns | ~90d (via the parallel seeders) |
+| Streaming demo | K=10 rounds × ~10k txns, ~1% fraud | 1,000 tx/s sustained (~10 fraud/s); rounds = wall-clock retrain windows (~10–15 min) |
+| Ring entity reuse | across rounds (15 farm / 50 mules) | across the run |
+| Label maturation lag | 1 round | compressed (minutes) |
+| Fixed labelled holdout | ~20k txns (~200 fraud) | ~200k–1M txns |
+| Redis | one `redis:8` container (collapsed) | one Redis cluster (collapsed from two) |
+| Seeding | direct Python script | parallel seeders (`seed_*`) into the single store, extended for mules/farm/look-alikes |
+| Engines / driver | 1 local / in-process script | N instances + aggregator + dashboard / Gatling @ 1,000 tx/s |
+| Validates | correctness + monotonic learning-curve assertion + dashboard vs a real (small) aggregator | scale/perf at prod scale + live cross-instance demo of recall↑ / FP↓ |
+
+#### 13.6.3 Shared invariants
+
+Both presets share the same fraud **joint signature**, **look-alike legit** near the blunt-rule boundary, **class imbalance (~1%)**, **entity reuse** across rounds, **stationary** pattern, **deterministic seed**, the same feature pipeline, and the same **model + evaluation methodology**: a CPU **LightGBM** classifier (Track A) retrained each round on matured labels, champion (frozen round-0) vs challenger (retrained), scored on the **same fixed labelled holdout at a fixed operating point** (e.g. fixed decline budget / fixed FPR), time-ordered split (train past → test future, never shuffle), reported per round as a learning curve. A rolling next-round test is the realistic variant; the fixed holdout is the primary (cleanest) view.
+
+#### 13.6.4 Training-set size is decoupled from population size
+
+At 5M customers the model still trains on a **sampled** labelled set (tens of thousands to a few million rows, including all matured fraud) — never 5M×90d. So retrain stays cheap at both tiers; what actually scales large is **Redis footprint, ingest throughput, and the engine fleet**, not model training. This is why the small tier is a genuine functional proxy for the large one.
+
+#### 13.6.5 Datasets produced (per preset)
+
+1. **Population:** customers, beneficiaries (incl. mules), devices (incl. farm), TPPs, with profiles.
+2. **Warm-start backfill:** legit behavioural traffic + seeded fraud → warms the Redis signals *and* seeds the round-0 training set.
+3. **Streaming demo:** transactions tagged with ground truth (legit, look-alike legit, fraud rings), with entity reuse across rounds.
+4. **Per-round label feed:** matured labels revealed on the maturation lag.
+5. **Fixed labelled holdout:** drawn from the stationary distribution for champion/challenger scoring.
+6. **Config seed:** `cfg:rules`/`cfg:windows`/`cfg:metrics` including the **blunt baseline rule** the model is expected to let us relax, plus decision bands.
+
+Data-generation requirements (enforced as generator self-checks): fraud separable on the *joint* features; look-alikes overlap the *blunt* feature but not the joint one; realistic imbalance; entity reuse; stationarity; seeded RNG for reproducibility.
+
+#### 13.6.6 Single collapsed Redis store
+
+For this work the feature and signal stores are **collapsed into one Redis** (one container small; one cluster large). The key families already carry distinct prefixes (`c:{cid}:…`, `sig:c:{cid}:…`, `sig:dev:{}`, `sig:b:{}`, `bl:*`, `cfg:*`) and per-entity hash tags, so nothing collides — the engine simply points both `fraud.feature-store.uri` and `fraud.signal-store.uri` at the same instance. The seed populates, in that one DB: reference/master data, `cfg:*` (incl. the blunt rule + bands), and the warm 24h-exact aggregates + 90d-approx signals for the seeded population so day-one scoring isn't cold. (Trade-off: feature + signal load now share shards — fine for the demo; the two-cluster split remains the production topology, §7.12.)
+
+#### 13.6.7 Tests
+
+- **Component tests (deterministic, tiny fixtures):** aggregator confusion counters + label-join (known decisions+labels → exact tp/fp/fn/tn and derived recall/precision/FPR); trainer (labelled fixture → model; point-in-time feature assembly with no post-event leakage); eval harness (known confusion → correct recall @ fixed FPR, precision, PR-AUC, £).
+- **Simulation assertion (the "gets better" test), seeded/deterministic, small preset:** run K rounds; at a fixed operating point assert the challenger's **recall increases** round 1→K by ≥ a threshold and is monotonically non-decreasing within tolerance; **FP-rate non-increasing**; challenger **≥ champion every round and strictly better by round K on both axes** on the same holdout. No-leakage (time-split) and both-metrics-improve (discrimination, not threshold) are baked into the assertion shape. A green run here backs the §10.3 dashboard's "apply feedback → recall up, FP down" with a real learning+containment curve rather than a scripted animation.
+
+The large preset reuses the identical generator and assertions; it additionally exercises Redis footprint, 1,000 tx/s ingest, the cross-instance aggregator, and the live dashboard, and is executed on the distributed environment per `LOAD_TEST_RUNBOOK.md`.

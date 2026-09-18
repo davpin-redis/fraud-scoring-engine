@@ -12,14 +12,15 @@ You have already provisioned:
 | Component | Setup |
 |---|---|
 | **Feature store cluster** | 3× `n2d-highmem-8`, no disks, 9 shards, all-master (no HA). Holds 24h exact signals + aggregates + reference. **Plain Redis — no modules required.** |
-| **Signal store cluster** | 3× `n2d-highmem-8`, no disks, all-master (no HA). Holds 90d signals: HyperLogLog / counters / hashes + **RedisTimeSeries** (velocity + behavioural rules R019–R026). TimeSeries is **bundled in Redis 8 / Redis Enterprise** — no separate install. No flash. |
+| **Signal store cluster** | 3× `n2d-highmem-8`, no disks, all-master (no HA). Holds 90d signals: HyperLogLog / counters / hashes + **fixed-width bucket hashes with per-field TTL** (`HEXPIRE`) + a capped events list (velocity + behavioural rules R017/R019–R026). **Core types only — no modules.** Bounded constant-size reads. No flash. |
 | **Engine VMs** | 3× `e2-standard-8`, JDK 25 installed. |
 | **Gatling VM** | 1× `e2-standard-8`, JDK 25 installed. |
 
 > The signal store is now RAM-only and **bounded** (a few KB per entity: HLLs cap at
 > ~12 KB, plus small counters/stats) — no more billion-doc index, no Flex/NVMe, no
-> RAM-ceiling. No `search`/`bf` modules; the signal store uses **RedisTimeSeries**
-> for the velocity + behavioural signals, which is bundled in Redis 8 / Redis Enterprise.
+> RAM-ceiling. **No modules** on the signal store; the velocity + behavioural signals
+> use core **fixed-width bucket hashes with per-field TTL** (`HEXPIRE`, Redis 8), so each
+> read returns a bounded, constant-size reply (flat egress under soak).
 
 **This runbook covers what's left:** the engine **load balancer**, engine
 deploy/config, loading + pre-warming the two stores, and running/monitoring the test.
@@ -142,7 +143,7 @@ daily history) ≈ ~100M ops for 5M → **~5–10 min on a single seeder VM**. N
 needed at 5M.
 
 > The seeder pre-warms the distinct/count/amount signals (R005/R012/R013/R018). The
-> **TimeSeries behavioural signals (R019–R026** — velocity vs baseline, sustained
+> **Behavioural bucket-hash signals (R017, R019–R026** — velocity vs baseline, sustained
 > elevation, circadian, cadence, bust-out, dormancy, device/payee velocity surge) **build up live** as
 > the engine scores during the run; they need no pre-seed (and by design need history
 > to accumulate before they engage).
@@ -318,15 +319,15 @@ accurate than the earlier estimates.
 | Tier | VMs | Shards | Measured basis (extrapolated to 5M) |
 |---|---|---|---|
 | **Feature store** (RAM) | **3× `n2d-highmem-8`** (8 vCPU / 64 GB = 192 GB) | **9 master** | **20.6 KB/customer × 5M ≈ ~105 GB** (~55% util); reads are trivial RAM lookups |
-| **Signal store** (RAM + TimeSeries) | **3× `n2d-highmem-8`** (8 vCPU / 64 GB = 192 GB) | **9 master** | **~90 GB** = TS velocity (4.4 KB/series) + TS amount (12.7 KB/series) ≈ 88 GB + non-TS HLL/counters/hash (0.35 KB/cust ≈ 1.8 GB) (~47% util) |
+| **Signal store** (RAM, core types) | **3× `n2d-highmem-8`** (8 vCPU / 64 GB = 192 GB) | **9 master** | **< 20 GB** = HLL/counters/z-score hash (~0.35 KB/cust ≈ 1.8 GB) + bounded bucket hashes + capped events list (~1–3 KB/active cust). Far lower than the earlier TimeSeries estimate (~90 GB) — the bucket hashes hold only fixed windows, not full-resolution series. Comfortable headroom; single-node would suffice on RAM, keep 3×/9-shard for CPU + HA. |
 | **Engine** | **3× `e2-standard-4`** (4 vCPU / 16 GB) behind an internal L4 LB | — | **~1.1 ms CPU/txn** (measured) → ~1.1 core @ 1000 tx/s → ~0.4 core/VM; 3 VMs for LB + N+1 + burst headroom. `-Xmx2g` |
 | **Gatling** | **1× `e2-standard-8`** (transient) | — | tune sysctl (§7); **2 injectors** for the 4k burst scenario |
 
 Sizing notes:
 - **The engine is far lighter than first estimated** — measured ~1.1 ms CPU/txn (not ~5–7), so 1000 tx/s needs only ~1 core total. `e2-standard-4` ×3 is generous; the 3 VMs are for availability/LB/burst, not raw throughput. Heap drops to `-Xmx2g` (working set is small).
-- **The amount TimeSeries is the signal store's RAM driver** — 12.7 KB/series (random amounts compress poorly) vs 4.4 KB for velocity, so it's ~74% of the TS RAM. If you don't need full-resolution amount history, a **downsampled amount series (daily/weekly compaction)** cuts the signal store roughly in half. (The amount **z-score** already comes from the count/sum/sumsq hash, so the amount TS is only for the R023 bust-out trend.)
+- **The signal store is no longer a RAM driver.** Replacing the per-customer velocity/amount TimeSeries (which grew to ~90 GB and, worse, returned ever-larger `TS.RANGE` replies under soak) with fixed-width bucket hashes bounds both RAM and per-call egress: each customer holds ≤ ~170 hourly + ≤ 24 five-min velocity buckets, ≤ 8 weekly amount buckets, a ≤ 64-element events list, and a last-event marker — all self-trimming via per-field TTL. The amount z-score still comes from the count/sum/sumsq monthly hash; R023 bust-out trend now reads the small weekly bucket hashes.
 - **No-HA / single copy.** For HA, add one replica per shard → ~2× the Redis node count.
-- **Burst 4–5k tx/s:** the engine is stateless — scale to 5–6 VMs; the Redis tiers have ample headroom, though the signal store's `TS.RANGE` aggregation is the first thing to watch (bump its vCPU to `n2d-highmem-16` if TS-read CPU climbs).
+- **Burst 4–5k tx/s:** the engine is stateless — scale to 5–6 VMs; both Redis tiers have ample headroom. Signal-store reads are now bounded constant-size `HGETALL`s (no growing `TS.RANGE`), so per-call cost is flat; watch per-shard CPU for key-skew, not reply growth.
 - **Approx cost** (GCP on-demand, us-central1): ~$1.9k/mo (feature ~$0.7k + signal ~$0.7k + engines ~$0.3k + Gatling ~$0.2k); ~**$1.2k/mo with a 1-yr CUD**. Verify in the pricing calculator.
 
 ---
@@ -352,3 +353,160 @@ Sizing notes:
 2. `--customers` / `--flagged` on both seeders = Gatling `-Dcustomers` / `-DhighRisk`.
 3. Load the feature-store config (`load_redis.py`) **before** the feature seeder, and
    never `--flush` after the config is in.
+
+---
+
+## Feedback-loop run (large scale, 5M / 1,000 tx/s)
+
+Runs the continuous-learning loop (design doc §8.4) at production scale so the live
+cross-instance dashboard (§10.3) shows **fraud detection rising and false positives
+falling** as the loop retrains. Builds on the load-test topology above; adds the audit
+stream, label pipeline, aggregator/dashboard, and the retrain/fast loops. Small-scale
+equivalents are proven in CI (`pipeline/` + engine tests); this is the distributed run.
+
+**Collapsed store:** feature + signal stores are one Redis (design doc §13.6.6) — point
+both `fraud.feature-store.uri` and `fraud.signal-store.uri` at it.
+
+### 0. Prerequisites & vars (feedback-loop run)
+```
+STORE=<collapsed Redis endpoint host>       # one cluster; see "Redis cluster sizing" below
+LB_VIP=<internal L4 LB VIP>                 # fronts the engines (§6)
+DATA=/data/parquet                          # shared path (Filestore mount) OR a gs:// bucket
+MODELS=/models                              # shared path engines read fraud.model.path from
+```
+- Pipeline VM: `pip install -r pipeline/requirements.txt` (redis, pyarrow, scikit-learn, duckdb, fastapi/uvicorn).
+- Shared storage for `$DATA` / `$MODELS` — see "Shared storage" below (GCS bucket recommended;
+  Filestore if you want a plain POSIX mount).
+- The audit sink writes the `txn:events` stream in the collapsed store; the Parquet writer
+  drains it to `$DATA` (system of record); DuckDB in `retrain_loop` reads it back.
+
+### 1. Seed (D3-large)
+```bash
+# reference data + cfg (rules incl. the blunt device rule + cfg:bands) into the one store
+python3 test_data/load_redis.py --redis-url redis://$STORE:6379/0        # config + fixtures
+# 5M warm signals — run this sharded across the 5 engine VMs (see "Compute" below).
+# Single-VM form (dev / smaller run); --days 30 matches the 200 GB no-HA sizing:
+python3 test_data/seed_feature_store.py --host $STORE --port 6379 --customers 5000000 --days 30 --procs 16
+python3 test_data/seed_signal_store.py  --host $STORE --port 6379 --customers 5000000 --flagged 50000 --procs 16
+```
+
+### 2. Pipeline services (one small VM; scale the Parquet writer + embedding-style consumers horizontally)
+```bash
+REDIS_URL=redis://$STORE:6379 PIPELINE_DATA=/data/parquet \
+  python3 pipeline/parquet_writer.py &                 # A3: txn:events -> Parquet (system of record; run N in the group)
+python3 pipeline/fast_loop.py &                        # B6: confirmed fraud -> bl:* (R001/R002 catch repeats live)
+python3 -m uvicorn --app-dir pipeline aggregator:create_app --factory --port 8090 &   # C1 + dashboard
+python3 pipeline/retrain_loop.py --audit /data/parquet/transactions --labels /data/parquet/labels \
+  --model-out /models --interval 900 &                 # slow loop: retrain -> ONNX -> publish model:invalidate
+```
+
+### 3. Engines (5 instances, behind the L4 LB as in §6)
+Set per instance: `fraud.model.enabled=true`, `fraud.model.type=onnx`,
+`fraud.model.path=/models/fraud-model.onnx` (a **shared/GCS-backed** path all engines read),
+`fraud.audit-sink.type=redis-stream`, both store URIs → `$STORE`. Each engine subscribes to
+`model:invalidate` (hot-swap the model) and `cfg:invalidate` (rules/bands).
+
+### 4. Drive traffic + labels (D4-large)
+```bash
+# Gatling @ 1,000 tx/s — fraud rings (mule_/farm_ entities) + look-alike legit (shared_ device)
+cd loadtest && ./mvnw -q gatling:test -Dgatling.simulationClass=fraud.FeedbackLoopSimulation \
+  -DbaseUrl=http://$LB_VIP:8080 -Dscenario=steady -Dtps=1000 -Dcustomers=5000000 &
+# Label feed — infers fraud from the mule_/farm_ entity scheme, submits matured labels
+REDIS_URL=redis://$STORE:6379 python3 pipeline/chargeback_feed.py &
+```
+`FeedbackLoopSimulation` emits the same three-process mixture as the offline generator; the
+chargeback feed is the ground truth the retrain + fast loops consume (compress the maturation
+lag for the demo). Both are provided and CI-checked (the Gatling sim compiles; the feed is
+unit-tested).
+
+### 5. Watch
+Open `http://<pipeline-vm>:8090/` — recall / FPR / precision **aggregated across all engines**
+(from the shared stream + Redis counters, not per-instance actuators). As `retrain_loop`
+ships a better ONNX (or you click **Apply feedback**), recall steps up and FPR steps down at
+the marker; `SCARD bl:accounts` grows as the fast loop contains rings.
+
+### Compute (feedback-loop run)
+| Component | VM | Count |
+|---|---|---|
+| Scoring engines | `e2-standard-8` (`-Xmx4g`) | **5** |
+| Pipeline services (Parquet writer×2–4, aggregator+dashboard, fast loop, chargeback feed) | `e2-standard-8` | 1 |
+| retrain_loop | `e2-standard-8` (or share pipeline VM) | 1 |
+| Gatling driver | `e2-standard-8` | 1 |
+| Seeder VMs | — | **reuse the 5 engine VMs** (see below) |
+
+**Seed on the engine VMs.** Seeding runs once, before traffic — the engines are idle then —
+so the 5 engine VMs double as the seeder pool instead of spinning up transient VMs. The
+seeders shard by customer-id range (`--customer-start` + `--customers` = this VM's slice,
+`--total-customers` = grand total so bene/payee pools size identically across VMs), so split
+the 5M range across the 5 VMs (1M each) and run in parallel:
+```bash
+# on engine VM i (i = 0..4): START=$((i * 1000000))
+python3 test_data/seed_feature_store.py --host $STORE --port 6379 \
+  --customer-start $START --customers 1000000 --total-customers 5000000 --days 30 --procs 8
+python3 test_data/seed_signal_store.py  --host $STORE --port 6379 \
+  --customer-start $START --customers 1000000 --total-customers 5000000 --flagged 50000 --procs 8
+```
+(`--days 30` matches the 200 GB sizing below. Flagged high-risk ids are `cust_1..flagged`, so
+run `--flagged 50000` on VM 0 only; other VMs pass `--flagged 0`.)
+Then start the engine process on each VM (§3) for the traffic phase. (`e2-standard-8` seeds
+comfortably; the bottleneck is Redis write throughput, not the seeder CPU.)
+
+### Redis cluster sizing (collapsed store, 5M / 1,000 tx/s) — **200 GB, no-HA**
+**Decision: 200 GB database capacity, no replication (single copy).** 200 GB usable at a safe
+~65% working-set utilisation holds **~130 GB**, so seed with the history lever **`--days 30`**
+(not the full 90d): feature ~55 GB + signal <20 GB + cached decisions ~13 GB (24 h TTL) +
+streams/labels/metrics/bl/cfg ~3–5 GB ≈ **~90 GB raw** → **~115 GB** with ~25% overhead — a
+comfortable fit inside 200 GB. (Full 90d ≈ ~155 GB raw would push a 200 GB db past ~90% util;
+it isn't needed for a few-hours feedback demo.)
+
+- **Nodes — no-HA:** **3 × `n2d-highmem-16`** (16 vCPU / 128 GB each → 384 GB total). The 200 GB
+  db is ~67 GB/node = **~52% of node RAM** at the cap (~30% at the actual ~115 GB working set).
+  3 nodes give a real quorum and even shard placement; no replicas, so a node loss drops its
+  ~1/3 of shards — acceptable for the demo, not for prod. (2× `n2d-highmem-8` = 128 GB can't even
+  hold a 200 GB db; 3× highmem-16 is the floor once you fix capacity at 200 GB on 3 nodes.)
+- **Shards: 12 primaries (4 per node).** Shard count here is **memory-bound, not CPU-bound** —
+  total load is only ~75–110K ops/s (≤250K burst), which ~5 shards would serve. The binding
+  constraints are the ~25 GB/shard ceiling (⇒ ≥8 shards for 200 GB) and even placement on 3
+  nodes. 12 lands at **~17 GB/shard db cap** (~10 GB at the working set): comfortable headroom
+  under the ceiling, balanced 4/4/4, uses ~8 of 16 cores for shards leaving the rest for the
+  proxy/OS.
+  - *Why not 8 shards/node (24)?* You can — 16 vCPU runs it and small ~8 GB shards recover fast —
+    but it's past what a memory-bound, low-ops workload needs; it only adds proxy fan-out and
+    connection overhead. Reach for it only if you expect ops (not data) to grow a lot.
+- **If you later want HA:** add a replica copy → 2× the memory → **6 × `n2d-highmem-16`** across
+  ≥3 AZs (12 primary + 12 replica). Out of scope for this run.
+- **Lever:** `--days 7` shrinks feature to ~15 GB (total ~50 GB raw) if you want extra margin.
+
+*(Production may split back into two clusters per §7.12; this run collapses them.)*
+
+### Shared storage
+Three things are shared: the **Parquet system-of-record** (writer→retrain/analytics), the
+**labels Parquet**, and the **ONNX model** (retrain→every engine).
+- **Recommended — GCS bucket** for `$DATA` (transactions + labels): the Parquet writer / DuckDB
+  read+write `gs://…` directly (pyarrow + gcsfs / DuckDB httpfs) — durable, cheap, no mount.
+- **Model artifact — GCS + fetch-on-`model:invalidate`:** publish `gs://…/fraud-model.onnx`(+manifest);
+  each engine, on the Pub/Sub message, downloads to a local `$MODELS` path then `reload()`s
+  (strongly consistent per fetch, avoids NFS). This small fetch step is the one remaining code
+  hook; without it, use a **Filestore** (managed NFS) mounted read-only on engines as `$MODELS`.
+- **Simplest single POSIX path:** one **Filestore** (e.g. 1 TB SSD) mounted on all VMs as `$DATA`
+  + `$MODELS` — zero glue, pricier, single-region. Do **not** use multi-attach Persistent Disk.
+
+### Sizing (added components, on top of §Sizing)
+| Component | Guidance |
+|---|---|
+| Redis Stream `txn:events` | bounded (`MAXLEN ~`), a few hundred MB; transport only — Parquet is the archive |
+| Parquet writer | 1–2 vCPU per consumer; **rolls one large atomic file per partition** every ~200k rows / 60 s (not per batch), so a few-hours run produces ~tens of files, not tens of thousands |
+| Parquet store | ~1–2 KB/txn × retention; on GCS — the durable training corpus. A few-hours run ≈ ~11M rows ≈ a few GB; delete the bucket after the run |
+| Aggregator + dashboard | 1 small VM (rolling Redis counters + SSE); stateless |
+| retrain_loop | 1 VM, a few GB RAM. **Reads via DuckDB** — the label↔snapshot join + maturation filter + 14-feature extraction + reservoir **sample** run in SQL over the Parquet/GCS globs (out-of-core, bounded RAM), returning only the training matrix (default cap 1M rows). Minutes per round, independent of the 5M population (§13.6.4). sklearn HGB needs no native libs; LightGBM would need `libgomp1` |
+| Model artifact store | shared/GCS path for `/models/*.onnx`; engines read on `model:invalidate` |
+
+### GCP-side notes
+1. **Engine feature snapshot** exposes all 14 model feature keys incl. `new_payee` (derived
+   from the pair state) — verified by `HotWindowRuleIT.featureSnapshotCarriesTheModelFeatureContract`.
+   `retrain_loop` rebuilds vectors from `feature_snapshot_json` directly.
+2. **Gatling feedback scenario** (`FeedbackLoopSimulation`) + **label feed** (`chargeback_feed.py`)
+   provided (step 4).
+3. **Model path** must be a shared/GCS-backed volume all engines read (`fraud.model.path`), so a
+   `retrain_loop` export + `model:invalidate` (cluster-wide Pub/Sub) hot-swaps every instance.
+   This is the one remaining deployment-config item (no code).

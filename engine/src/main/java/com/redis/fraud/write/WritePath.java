@@ -133,7 +133,7 @@ public class WritePath {
     public boolean writeOnce(ScoreRequest request, ScoreResult result) {
         Instant now = OffsetDateTime.parse(request.timestamp()).toInstant();
         String cid = request.customerId();
-        String bene = request.receiverTransactionBankAccountNumber();
+        String bene = request.receiverAccount();
         double amount = fx.toBase(request.amount() == null ? 0.0 : request.amount(), request.currency());
         String hourBucket = BucketTimes.hourBucket(now);
         String dayBucket = BucketTimes.dayBucket(now);

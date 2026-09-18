@@ -1,0 +1,16 @@
+# Feedback-loop data/ML pipeline (Python side; the engine stays Java).
+redis>=5.0
+pyarrow>=14.0
+numpy>=1.24
+scikit-learn>=1.4    # Track A model (HistGradientBoosting) + metrics/PR-AUC (Phase 2)
+skl2onnx>=1.16       # export the trained model -> ONNX for in-engine scoring (Phase 4/B4)
+onnx>=1.15
+duckdb>=1.0          # retrain read path: join+sample+feature-extract over Parquet/GCS (out-of-core)
+fastapi>=0.110       # metrics aggregator SSE (Phase 3/C1)
+uvicorn>=0.29
+pytest>=8.0
+
+# Optional:
+#   onnxruntime>=1.19 # only to validate exported ONNX from Python; the engine scores via the Java runtime.
+#   lightgbm>=4.0     # documented prod model; needs OpenMP (`libgomp1` on Linux / `brew install libomp` on macOS).
+#                     # The pipeline defaults to sklearn HistGradientBoosting so it runs without it.

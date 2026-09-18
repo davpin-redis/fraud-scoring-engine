@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fraud feedback loop, live dashboard</title>
+<style>
+/* =====================================================================
+   Redis UI theme (redis-theme.css) inlined for a standalone file.
+   Official Redis 2024 Digital UI tokens: Midnight + Dusk surfaces,
+   Hyper Red accent, Lily / Sky / Violet data colours.
+   ===================================================================== */
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap");
+
+:root{
+  --rds-font-sans:"Space Grotesk",system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --rds-font-mono:"Space Mono",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  --rds-radius-card:0.75rem; --rds-radius-btn:5px; --rds-radius-chip:6px; --rds-radius-pill:999px;
+  --rds-hyper:#FF4438; --rds-mars:#8A221C; --rds-midnight:#091A23;
+  --rds-lily:#DCFF1E; --rds-sky:#33C2FB; --rds-violet:#C795E3;
+}
+:root[data-theme="dark"]{
+  --rds-bg:#091A23; --rds-surface:#0D2733; --rds-surface-2:#163341; --rds-surface-hover:#2D4754;
+  --rds-border:#163341; --rds-text:#F3F3F3; --rds-muted:#8A99A0; --rds-muted-2:#5C707A; --rds-grid:#2D4754;
+  --rds-accent:var(--rds-hyper); --rds-accent-soft:rgba(255,68,56,0.16);
+  --rds-good:var(--rds-lily); --rds-info:var(--rds-sky); --rds-link:var(--rds-sky);
+  --rds-shadow:0 4px 18px rgba(9,26,35,0.50); --rds-shadow-hover:0 8px 26px rgba(255,68,56,0.18);
+  --rds-card-inset:inset 0 1px 0 rgba(255,255,255,0.04); --rds-cta-fill:#351D22;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--rds-bg);color:var(--rds-text);font-family:var(--rds-font-sans);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;}
+h1,h2,h3{font-family:var(--rds-font-sans);letter-spacing:-0.01em;font-weight:600;margin:0;}
+.rds-navbar{display:flex;align-items:center;gap:1rem;padding:0.75rem 2rem;background:var(--rds-surface);
+  border-bottom:1px solid var(--rds-border);box-shadow:var(--rds-shadow);}
+.rds-brand{display:inline-flex;align-items:center;gap:0.6rem;font-weight:600;}
+.rds-brand svg{height:22px;width:auto;}
+.rds-card{background:var(--rds-surface);border:1px solid var(--rds-border);border-radius:var(--rds-radius-card);
+  box-shadow:var(--rds-card-inset),var(--rds-shadow);padding:1.1rem 1.25rem;}
+.rds-kpi{position:relative;overflow:hidden;background:var(--rds-surface);border:1px solid var(--rds-border);
+  border-radius:var(--rds-radius-card);box-shadow:var(--rds-card-inset),var(--rds-shadow);padding:1rem 1.15rem;}
+.rds-kpi::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--rds-accent);opacity:0.7;}
+.rds-kpi .rds-kpi-label{font-size:0.68rem;font-weight:600;color:var(--rds-muted);text-transform:uppercase;
+  letter-spacing:0.08em;margin-bottom:0.4rem;display:flex;align-items:center;justify-content:space-between;gap:0.4rem;}
+.rds-kpi .rds-kpi-value{font-family:var(--rds-font-mono);font-size:1.7rem;font-weight:600;line-height:1.1;
+  letter-spacing:-0.01em;font-variant-numeric:tabular-nums;}
+.rds-kpi .rds-kpi-sub{font-size:0.72rem;color:var(--rds-muted-2);margin-top:0.3rem;font-family:var(--rds-font-mono);}
+.rds-kpi.is-ok::before{background:var(--rds-good);opacity:1;} .rds-kpi.is-ok .rds-kpi-value{color:var(--rds-good);}
+.rds-kpi.is-info::before{background:var(--rds-info);opacity:1;} .rds-kpi.is-info .rds-kpi-value{color:var(--rds-info);}
+.rds-kpi.is-bad::before{background:var(--rds-accent);opacity:1;} .rds-kpi.is-bad .rds-kpi-value{color:var(--rds-accent);}
+.rds-badge{display:inline-flex;align-items:center;padding:0.15rem 0.5rem;border-radius:var(--rds-radius-pill);
+  font-size:0.68rem;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;}
+.rds-badge-warn{background:rgba(199,149,227,0.20);color:var(--rds-violet);}
+.rds-badge-ok{background:rgba(220,255,30,0.14);color:var(--rds-good);}
+.rds-badge-info{background:rgba(51,194,251,0.16);color:var(--rds-info);}
+.up{color:var(--rds-good);} .down{color:var(--rds-good);} .bad{color:var(--rds-accent);}
+.wrap{max-width:1180px;margin:0 auto;padding:1.5rem 2rem 3rem;}
+.topline{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;}
+.live-dot{width:9px;height:9px;border-radius:50%;background:var(--rds-good);display:inline-block;
+  box-shadow:0 0 0 0 rgba(220,255,30,0.6);animation:pulse 1.6s infinite;}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(220,255,30,0.5);}70%{box-shadow:0 0 0 7px rgba(220,255,30,0);}100%{box-shadow:0 0 0 0 rgba(220,255,30,0);}}
+.meta{display:flex;gap:1.5rem;flex-wrap:wrap;margin:0.4rem 0 1.25rem;color:var(--rds-muted);font-size:0.85rem;align-items:center;}
+.meta b{color:var(--rds-text);font-family:var(--rds-font-mono);font-weight:400;}
+.kpi-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:0.9rem;margin-bottom:1.4rem;}
+@media(max-width:1050px){.kpi-grid{grid-template-columns:repeat(3,1fr);}}
+@media(max-width:640px){.kpi-grid{grid-template-columns:repeat(2,1fr);}}
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.9rem;margin-bottom:1.4rem;}
+@media(max-width:900px){.chart-grid{grid-template-columns:1fr;}}
+.chart-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem;}
+.chart-head h3{font-size:0.95rem;}
+.legend{display:flex;gap:0.9rem;font-size:0.72rem;color:var(--rds-muted);font-family:var(--rds-font-mono);}
+.legend i{display:inline-block;width:12px;height:2px;vertical-align:middle;margin-right:0.35rem;}
+.legend i.dash{background:linear-gradient(90deg,var(--rds-muted) 60%,transparent 0);background-size:5px 2px;}
+.chartbox{position:relative;height:190px;}
+.chartbox canvas{position:absolute;inset:0;width:100%;height:100%;}
+.cmp{display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:0;font-family:var(--rds-font-mono);font-size:0.85rem;}
+.cmp>div{padding:0.5rem 0.75rem;border-bottom:1px solid var(--rds-border);}
+.cmp .hd{color:var(--rds-muted);text-transform:uppercase;font-size:0.66rem;letter-spacing:0.08em;font-family:var(--rds-font-sans);font-weight:600;}
+.cmp .metric{color:var(--rds-muted);font-family:var(--rds-font-sans);}
+.btn{font-family:inherit;font-size:0.82rem;font-weight:600;cursor:pointer;border-radius:var(--rds-radius-btn);
+  padding:0.45rem 0.9rem;border:1px solid var(--rds-border);background:var(--rds-surface-2);color:var(--rds-text);}
+.btn.primary{background:var(--rds-accent);border-color:var(--rds-accent);color:#fff;}
+.btn:disabled{opacity:0.45;cursor:default;}
+.foot{color:var(--rds-muted-2);font-size:0.78rem;line-height:1.6;margin-top:1.4rem;}
+.spacer{flex:1;}
+</style>
+</head>
+<body>
+
+<div class="rds-navbar">
+  <span class="rds-brand">
+    <svg viewBox="0 0 85 27" fill="none" role="img" aria-label="Redis"><path fill-rule="evenodd" clip-rule="evenodd" d="M75.2909 13.8125C75.2909 10.8448 77.4892 9.12284 80.2371 9.12284C82.2888 9.12284 84.1207 10.1121 85 12.5668C84.7435 13.8125 83.2047 15.2047 82.5453 15.4246C81.9957 14.2522 81.3728 13.556 80.7866 13.556C80.0539 13.556 80.0172 14.069 80.0172 14.7284C80.0172 15.1955 80.151 15.8834 80.3119 16.7112C80.5549 17.9615 80.8599 19.5309 80.8599 21.1401C80.8599 24.0711 78.8082 26.2328 75.6573 26.2328C72.7721 26.2328 71.1778 24.3414 70.4665 21.3198C68.5818 24.6972 65.8257 26.2328 63.7134 26.2328C60.411 26.2328 59.6338 23.7919 59.7121 21.3161C58.3852 23.6612 55.831 26.2328 53.3815 26.2328C50.8809 26.2328 49.9976 24.0563 50.2002 21.5215C48.702 24.3122 45.9919 26.2328 43.3793 26.2328C40.5442 26.2328 39.141 23.9806 39.5951 21.189C37.6878 23.5333 34.1374 26.2328 30.4461 26.2328C26.2373 26.2328 24.4053 23.9632 24.1882 21.1193C22.1568 24.375 19.4187 26.3427 16.1573 26.3427C11.4493 26.3427 9.76537 22.1561 9.52032 18.7315C7.77547 21.0681 5.81377 23.4923 3.40733 26.1961C3.15086 26.4526 2.93103 26.5991 2.67457 26.5991C1.8319 26.5991 0.109914 22.8621 0 21.4698C0.723099 20.3478 5.28119 15.3398 8.95093 11.3079C10.2409 9.89066 11.4211 8.594 12.2863 7.6291C10.0389 8.30726 7.72169 9.65975 4.79957 11.7608C4.28664 12.1272 2.85776 8.7931 2.8944 6.22845C6.26509 3.73707 11.3944 2.16164 15.5345 2.16164C21.3233 2.16164 24.6573 5.38578 24.6573 9.8556C24.6573 13.5927 21.5431 17.6961 17 17.8427C14.6377 17.904 13.1237 16.578 12.3494 14.9405C12.4419 17.473 13.7587 20.5905 17.2931 20.5905C21.1462 20.5905 22.9965 18.2646 25.7559 14.7958C28.6509 11.2112 31.3621 8.64655 35.319 8.64655C37.7371 8.64655 39.3858 10.1487 39.3858 12.4203C39.3858 15.1681 36.1616 18.9784 31.6552 18.9784C30.8855 18.9784 30.1839 18.877 29.5917 18.6766C29.5768 18.7921 29.5668 18.9058 29.5668 19.0151C29.5668 20.2974 30.0431 21.0668 32.1315 21.0668C35.2091 21.0668 38.1034 19.2349 41.6207 14.9483C45.0647 10.7349 47.6659 8.90302 50.4138 8.90302C52.2687 8.90302 53.6765 9.90832 54.2969 11.6014C57.9796 6.28253 61.1038 2.51388 63.75 0C66.3513 1.09914 68.2198 3.26078 67.7069 3.70043C65.7651 5.45905 59.2802 12.5302 56.7155 16.7435C56.056 17.8427 55.4332 19.0517 55.4332 19.6379C55.4332 20.1875 55.7629 20.3707 56.1293 20.3707C57.8898 20.3707 61.4176 16.2147 64.4645 12.6253C65.6026 11.2845 66.6736 10.0228 67.5603 9.08621C69.6121 9.92888 71.7004 11.7241 71.1875 12.347C68.4763 15.5711 66.4246 18.2091 66.4246 19.7112C66.4246 20.1142 66.5711 20.3707 67.1207 20.3707C68.1466 20.3707 69.0991 19.4547 70.6746 17.5129C71.0043 17.1099 71.4073 17.1099 71.6638 17.7328C72.3599 19.4181 73.3858 20.3341 74.1918 20.3341C75.1444 20.3341 75.6207 19.4914 75.6207 18.2091C75.6207 16.9268 75.2909 15.0949 75.2909 13.8125Z" fill="#FF4438"/></svg>
+    <span>Fraud scoring</span>
+  </span>
+  <span style="color:var(--rds-muted-2)">/</span>
+  <span style="color:var(--rds-muted);font-size:0.9rem">Feedback loop dashboard</span>
+  <span class="spacer"></span>
+  <span class="rds-badge rds-badge-warn">Test environment</span>
+</div>
+
+<div class="wrap">
+  <div class="topline">
+    <h1 style="font-size:1.25rem;">Continuous learning &mdash; live effect</h1>
+    <span class="spacer"></span>
+    <button id="btnFeedback" class="btn primary">Apply feedback (promote challenger)</button>
+    <button id="btnReset" class="btn">Reset</button>
+  </div>
+  <div class="meta">
+    <span><span class="live-dot"></span> &nbsp;Live</span>
+    <span>Aggregated across <b id="mInst">5</b> engine instances</span>
+    <span>Window <b>rolling 5&nbsp;min</b></span>
+    <span>Champion <b id="mChamp">seed-v0</b></span>
+    <span>Challenger <b id="mChall">fb-v1 (shadow)</b></span>
+    <span id="mFbState" class="rds-badge rds-badge-info">Awaiting feedback</span>
+  </div>
+
+  <!-- headline KPIs -->
+  <div class="kpi-grid">
+    <div class="rds-kpi is-ok">
+      <div class="rds-kpi-label">Fraud detection rate <span title="recall = caught / total fraud">(recall)</span></div>
+      <div class="rds-kpi-value" id="kRecall">0.0%</div>
+      <div class="rds-kpi-sub" id="kRecallD">&mdash;</div>
+    </div>
+    <div class="rds-kpi is-info" id="kpiFprCard">
+      <div class="rds-kpi-label">False positive rate <span title="legit flagged / total legit">(lower = better)</span></div>
+      <div class="rds-kpi-value" id="kFpr">0.0%</div>
+      <div class="rds-kpi-sub" id="kFprD">&mdash;</div>
+    </div>
+    <div class="rds-kpi is-info">
+      <div class="rds-kpi-label">Precision</div>
+      <div class="rds-kpi-value" id="kPrec">0.0%</div>
+      <div class="rds-kpi-sub" id="kPrecD">&mdash;</div>
+    </div>
+    <div class="rds-kpi is-ok">
+      <div class="rds-kpi-label">Fraud &pound; caught (cum.)</div>
+      <div class="rds-kpi-value" id="kCaught">&pound;0</div>
+      <div class="rds-kpi-sub">since test start</div>
+    </div>
+    <div class="rds-kpi is-bad">
+      <div class="rds-kpi-label">False-decline &pound; cost (cum.)</div>
+      <div class="rds-kpi-value" id="kFdc">&pound;0</div>
+      <div class="rds-kpi-sub">legit blocked</div>
+    </div>
+    <div class="rds-kpi is-info">
+      <div class="rds-kpi-label">Throughput (cluster)</div>
+      <div class="rds-kpi-value" id="kTps">0</div>
+      <div class="rds-kpi-sub">decisions / s</div>
+    </div>
+  </div>
+
+  <!-- charts -->
+  <div class="chart-grid">
+    <div class="rds-card">
+      <div class="chart-head">
+        <h3>Fraud detection rate (recall) &mdash; higher is better</h3>
+        <div class="legend"><span><i style="background:var(--rds-good)"></i>challenger</span><span><i class="dash"></i>champion</span></div>
+      </div>
+      <div class="chartbox"><canvas id="cRecall"></canvas></div>
+    </div>
+    <div class="rds-card">
+      <div class="chart-head">
+        <h3>False positive rate &mdash; lower is better</h3>
+        <div class="legend"><span><i style="background:var(--rds-sky)"></i>challenger</span><span><i class="dash"></i>champion</span></div>
+      </div>
+      <div class="chartbox"><canvas id="cFpr"></canvas></div>
+    </div>
+  </div>
+
+  <!-- champion vs challenger operating point -->
+  <div class="rds-card" style="margin-bottom:1.2rem;">
+    <div class="chart-head"><h3>Operating point &mdash; champion vs challenger (same labelled holdout)</h3></div>
+    <div class="cmp">
+      <div class="hd">Metric</div><div class="hd">Champion</div><div class="hd">Challenger</div><div class="hd">&Delta;</div>
+      <div class="metric">Recall (fraud caught)</div><div id="cpR0">&mdash;</div><div id="cpR1">&mdash;</div><div id="cpRd" class="up">&mdash;</div>
+      <div class="metric">False positive rate</div><div id="cpF0">&mdash;</div><div id="cpF1">&mdash;</div><div id="cpFd" class="down">&mdash;</div>
+      <div class="metric">Precision</div><div id="cpP0">&mdash;</div><div id="cpP1">&mdash;</div><div id="cpPd" class="up">&mdash;</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>Cross-instance by construction.</b> These are not per-engine `/actuator` numbers. Every engine appends its decision to the
+    shared <code>txn:events</code> Redis Stream; a metrics aggregator joins those decisions with the label store and maintains
+    <b>global confusion counters in Redis</b> (<code>metrics:{modelVersion}:{minute}</code> &rarr; tp/fp/fn/tn). This page reads the
+    aggregator over SSE, so the figures already span all instances and survive restarts / autoscaling.<br>
+    <b>Label latency.</b> Recall / precision / FP-rate need ground truth, which in production lags (chargebacks days later); this live
+    view is exact only because the test supplies labels immediately (seeded scenario + approved-but-fraud marks). Both metrics improve
+    together only because the challenger has better <i>discrimination</i>, shown by it sitting at a strictly better operating point on the
+    same labelled holdout &mdash; not by moving a threshold.<br>
+    <span class="rds-badge rds-badge-ok" id="feedTag">Simulated feed</span>
+    &nbsp;Swap to live by setting <code>USE_SIMULATION=false</code> (connects to <code>/metrics/fraud/stream</code>).
+  </div>
+</div>
+
+<script>
+/* =====================================================================
+   Data feed. USE_SIMULATION=true drives the page from a built-in demo
+   simulation. Set false to consume the real aggregator's SSE endpoint,
+   which must emit JSON frames of this shape (one per ~1s):
+   {
+     ts:Number, instances:Number, window:"5m",
+     champion:{version, recall, fpr, precision},
+     challenger:{version, recall, fpr, precision, active:Boolean},
+     gbp:{fraudCaught, falseDeclineCost}, tps:Number,
+     feedbackAppliedTs: Number|null
+   }
+   ===================================================================== */
+const USE_SIMULATION = true;
+const MAXPTS = 90;                 // rolling window of points shown
+const state = {t:[], champR:[], challR:[], champF:[], challF:[], fbAt:null};
+let caught=0, fdc=0, precC=0.55, precH=0.55;
+
+const $=id=>document.getElementById(id);
+const pct=x=>(x*100).toFixed(1)+"%";
+const gbp=x=>"£"+Math.round(x).toLocaleString("en-GB");
+const noise=a=>(Math.random()-0.5)*a;
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+
+function pushFrame(f){
+  state.t.push(f.ts);
+  state.champR.push(f.champion.recall);
+  state.challR.push(f.challenger.recall);
+  state.champF.push(f.champion.fpr);
+  state.challF.push(f.challenger.fpr);
+  if(f.feedbackAppliedTs && state.fbAt===null) state.fbAt=f.feedbackAppliedTs;
+  while(state.t.length>MAXPTS){["t","champR","challR","champF","challF"].forEach(k=>state[k].shift());}
+
+  precC=f.champion.precision; precH=f.challenger.precision;
+  caught=f.gbp.fraudCaught; fdc=f.gbp.falseDeclineCost;
+  $("mInst").textContent=f.instances;
+  $("kTps").textContent=Math.round(f.tps).toLocaleString("en-GB");
+  render(f);
+}
+
+function delta(v,base,goodUp){
+  const d=v-base, sign=d>=0?"+":"";
+  const good = goodUp ? d>0.0005 : d<-0.0005;
+  const cls = good?(goodUp?"up":"down"):"bad";
+  const arrow = d>0.0005?"▲":(d<-0.0005?"▼":"→");
+  return `<span class="${cls}">${arrow} ${sign}${(d*100).toFixed(1)} pts vs champion</span>`;
+}
+
+function render(f){
+  const cr=f.challenger.recall, cf=f.challenger.fpr;
+  $("kRecall").textContent=pct(cr);
+  $("kFpr").textContent=pct(cf);
+  $("kPrec").textContent=pct(precH);
+  $("kRecallD").innerHTML=delta(cr,f.champion.recall,true);
+  $("kFprD").innerHTML=delta(cf,f.champion.fpr,false);
+  $("kPrecD").innerHTML=delta(precH,precC,true);
+  $("kpiFprCard").className="rds-kpi "+(cf>0.06?"is-bad":"is-info");
+  $("kCaught").textContent=gbp(caught);
+  $("kFdc").textContent=gbp(fdc);
+
+  // operating-point table
+  $("cpR0").textContent=pct(f.champion.recall); $("cpR1").textContent=pct(cr);
+  $("cpF0").textContent=pct(f.champion.fpr);    $("cpF1").textContent=pct(cf);
+  $("cpP0").textContent=pct(precC);             $("cpP1").textContent=pct(precH);
+  $("cpRd").innerHTML=delta(cr,f.champion.recall,true);
+  $("cpFd").innerHTML=delta(cf,f.champion.fpr,false);
+  $("cpPd").innerHTML=delta(precH,precC,true);
+
+  if(state.fbAt){ $("mFbState").className="rds-badge rds-badge-ok"; $("mFbState").textContent="Feedback applied"; }
+
+  drawChart($("cRecall"), state.challR, state.champR, [0,1], getVar("--rds-good"));
+  drawChart($("cFpr"),    state.challF, state.champF, [0,0.16], getVar("--rds-sky"));
+}
+
+function getVar(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+
+function drawChart(cv, series, ref, yr, color){
+  const dpr=window.devicePixelRatio||1, w=cv.clientWidth, h=cv.clientHeight;
+  cv.width=w*dpr; cv.height=h*dpr; const g=cv.getContext("2d"); g.scale(dpr,dpr);
+  g.clearRect(0,0,w,h);
+  const padL=6,padR=44,padT=10,padB=8, iw=w-padL-padR, ih=h-padT-padB;
+  const grid=getVar("--rds-grid"), muted=getVar("--rds-muted-2"), surf=getVar("--rds-surface");
+  const x=i=>padL+(series.length<=1?0:i/(MAXPTS-1)*iw);
+  const y=v=>padT+ih-((v-yr[0])/(yr[1]-yr[0]))*ih;
+  // gridlines + right axis labels
+  g.strokeStyle=grid; g.fillStyle=muted; g.font="10px 'Space Mono',monospace"; g.lineWidth=1;
+  for(let k=0;k<=4;k++){const val=yr[0]+(yr[1]-yr[0])*k/4, yy=y(val);
+    g.globalAlpha=0.5; g.beginPath(); g.moveTo(padL,yy); g.lineTo(padL+iw,yy); g.stroke(); g.globalAlpha=1;
+    g.fillText((val*100).toFixed(0)+"%", padL+iw+6, yy+3);}
+  // feedback marker
+  if(state.fbAt){ const idx=state.t.indexOf(state.fbAt);
+    if(idx>=0){const mx=x(idx); g.strokeStyle=getVar("--rds-violet"); g.setLineDash([4,3]); g.lineWidth=1.5;
+      g.beginPath(); g.moveTo(mx,padT); g.lineTo(mx,padT+ih); g.stroke(); g.setLineDash([]);
+      g.fillStyle=getVar("--rds-violet"); g.fillText("feedback", Math.min(mx+4,padL+iw-46), padT+9);}}
+  const line=(arr,col,dash)=>{ if(arr.length<2)return; g.strokeStyle=col; g.lineWidth=dash?1.5:2.5;
+    g.setLineDash(dash?[5,4]:[]); g.beginPath();
+    arr.forEach((v,i)=>{const px=x(i),py=y(clamp(v,yr[0],yr[1])); i?g.lineTo(px,py):g.moveTo(px,py);});
+    g.stroke(); g.setLineDash([]);};
+  line(ref, muted, true);      // champion (dashed, muted)
+  line(series, color, false);  // challenger (solid, colour)
+  // last-point dot
+  if(series.length){const i=series.length-1,px=x(i),py=y(clamp(series[i],yr[0],yr[1]));
+    g.fillStyle=color; g.beginPath(); g.arc(px,py,3,0,7); g.fill();
+    g.strokeStyle=surf; g.lineWidth=2; g.stroke();}
+}
+
+/* -------------------- simulation -------------------- */
+let sim=null;
+function startSim(){
+  const base={recall:0.61, fpr:0.088, prec:0.55};
+  const target={recall:0.86, fpr:0.028, prec:0.79};
+  let tick=0, fbTick=null, ramp=0;
+  caught=0; fdc=0;
+  clearInterval(sim);
+  sim=setInterval(()=>{
+    const now=Date.now();
+    if(fbTick!==null) ramp=clamp((tick-fbTick)/8,0,1);   // 8s ramp after feedback
+    const ease=ramp*ramp*(3-2*ramp);
+    const champ={recall:base.recall+noise(0.02), fpr:base.fpr+noise(0.006), precision:base.prec+noise(0.02)};
+    const chall={
+      recall: base.recall + (target.recall-base.recall)*ease + noise(0.015),
+      fpr:    base.fpr    + (target.fpr-base.fpr)*ease       + noise(0.004),
+      precision: base.prec + (target.prec-base.prec)*ease    + noise(0.015),
+      active: fbTick!==null
+    };
+    // cumulative £: challenger catches more fraud, blocks fewer legit after feedback
+    caught += (chall.recall)*950 + noise(40);
+    fdc    += (chall.fpr)*1400 + noise(20);
+    pushFrame({ts:now, instances:5+(Math.random()<0.1?(Math.random()<0.5?-1:1):0), window:"5m",
+      champion:champ, challenger:chall, gbp:{fraudCaught:caught, falseDeclineCost:fdc},
+      tps:1000+noise(120), feedbackAppliedTs: fbTick!==null?state._fbTs||(state._fbTs=now):null});
+    tick++;
+  },1000);
+  // expose trigger
+  window.__applyFeedback=()=>{ if(fbTick===null){fbTick=tick;} };
+  window.__resetSim=()=>{ Object.assign(state,{t:[],champR:[],challR:[],champF:[],challF:[],fbAt:null,_fbTs:null});
+    tick=0; fbTick=null; ramp=0; caught=0; fdc=0;
+    $("mFbState").className="rds-badge rds-badge-info"; $("mFbState").textContent="Awaiting feedback"; };
+}
+
+/* -------------------- live SSE (real aggregator) -------------------- */
+function startLive(){
+  $("feedTag").textContent="Live feed"; $("feedTag").className="rds-badge rds-badge-info";
+  const es=new EventSource("/metrics/fraud/stream");
+  es.onmessage=e=>{ try{ pushFrame(JSON.parse(e.data)); }catch(_){} };
+  window.__applyFeedback=()=>fetch("/metrics/fraud/apply-feedback",{method:"POST"});
+  window.__resetSim=()=>location.reload();
+}
+
+$("btnFeedback").onclick=()=>{ window.__applyFeedback&&window.__applyFeedback();
+  $("btnFeedback").disabled=true; setTimeout(()=>$("btnFeedback").disabled=false,8000); };
+$("btnReset").onclick=()=>window.__resetSim&&window.__resetSim();
+window.addEventListener("resize",()=>render({champion:{recall:state.champR.at(-1)||0,fpr:state.champF.at(-1)||0,precision:precC},
+  challenger:{recall:state.challR.at(-1)||0,fpr:state.challF.at(-1)||0,precision:precH},
+  gbp:{fraudCaught:caught,falseDeclineCost:fdc}, instances:+$("mInst").textContent, tps:+$("kTps").textContent.replace(/,/g,"")}));
+
+USE_SIMULATION ? startSim() : startLive();
+</script>
+</body>
+</html>

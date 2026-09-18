@@ -49,3 +49,6 @@ application-local.yaml
 *.iml
 .DS_Store
 Thumbs.db
+
+# feedback-loop pipeline local data (Parquet system-of-record, regenerated)
+pipeline/data/

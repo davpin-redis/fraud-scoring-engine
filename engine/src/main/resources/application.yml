@@ -9,14 +9,20 @@ spring:
     default-property-inclusion: non_null
 
 fraud:
-  # Two RAM Redis databases (§7.12, revised — Flex removed): the feature store holds
-  # 24h exact signals + aggregates + reference data; the signal store holds the 90d
-  # approximate hot-window signals (HyperLogLog / counters / rolling stats — core
-  # types only, no modules). Every scored txn also flows to the audit sink (§4.3).
+  # Feature + signal stores are COLLAPSED INTO ONE Redis for the continuous-learning
+  # work (§8.4/§13.6) — both URIs point at the same instance. Distinct key prefixes
+  # and per-entity hash tags keep the two families separate; the two-cluster split
+  # remains the production topology (§7.12). Every scored txn also flows to the
+  # audit sink, now a bounded Redis Stream (§8.4.1).
   feature-store:
     uri: redis://localhost:6379
   signal-store:
-    uri: redis://localhost:6381
+    uri: redis://localhost:6379
+  audit-sink:
+    # redis-stream: XADD each scored txn to a bounded stream (§8.4.1). noop: drop (legacy placeholder).
+    type: redis-stream
+    stream: txn:events
+    maxlen: 1000000          # approximate cap — the stream is transport, not the archive (Parquet is)
   redis:
     # Log one line per Redis call (command type + latency) for both stores (§10).
     # Verbose at high TPS — set false (or logging.level.com.redis.fraud.redis.RedisCallLog=WARN)
@@ -24,8 +30,13 @@ fraud:
     log-calls: true
   model:
     # When false, scoring bypasses the ML model entirely (seed-v0 rules-only).
-    # When true, the embedded model (ml/train.py artifact) is loaded and called.
+    # When true, the embedded model is loaded and called as an extra escalation check (§8.3).
     enabled: false
+    # Which scorer to load when enabled: 'linear' (classpath logistic, ml/train.py) or
+    # 'onnx' (the Track-A feedback model, hot-reloaded from `path` on model:invalidate, §8.4.3).
+    type: linear
+    # Filesystem path to the ONNX artifact (+ <name>.manifest.json sidecar) when type=onnx.
+    path: model/fraud-model.onnx
 
 server:
   port: 8080
