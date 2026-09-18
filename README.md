@@ -345,4 +345,18 @@ firewall, per-VM commands). Summary of the steps:
 - Open design questions (region routing owner, per-region availability scope,
   `confirmed_legit` maturation window, override-layer bounds) are tracked in
   §12 of the design doc.
+
+---
+
+## License
+
+Copyright 2026 Redis Ltd. Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Dependencies keep their own licenses (Apache-2.0 / MIT / BSD throughout; no
+GPL/AGPL/SSPL). One exception is test-scope only: the Gatling load test's
+`gatling-charts-highcharts` report module embeds proprietary Highcharts under a
+grant limited to Gatling's own report generation — fine as used here, but do not
+extract or redistribute the generated report's Highcharts components. The
+Apache-2.0 grant above covers this repository's own source; it does not relicense
+any dependency.
 ```
