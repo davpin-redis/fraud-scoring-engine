@@ -18,32 +18,90 @@ Build plan and phase-by-phase status: [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_
 
 ## Architecture
 
-Synchronous scoring path (§3.2); persistence happens off the response path so it
-never adds caller latency.
+The system has two coupled halves: a **synchronous scoring path** (§3.2 — never
+blocks on persistence) and an asynchronous **continuous-learning feedback loop**
+(§8.4) that turns scored traffic plus confirmed outcomes back into live blacklists
+and a retrained model. In the diagram, solid arrows are request/data flow, dotted
+arrows are the model load/hot-reload.
 
+```mermaid
+flowchart TB
+    Client(["Client<br/>POST /v1/transactions/score"])
+
+    subgraph Engine["Scoring engine — Spring Boot · stateless · ×N behind LB"]
+        direction TB
+        SC["ScoreController<br/>idempotent short-circuit §7.8"]
+        FA["Feature assembly · FeatureService §7.10"]
+        SR["Signal read · SignalReader<br/>concurrent · degrades §3.5"]
+        RE["Rules engine · cfg:rules<br/>hard-block R001/R002"]
+        SCORE["Scoring<br/>LinearModelScorer / OnnxModelScorer §8.3"]
+        DEC{"Decision<br/>approve / review / decline"}
+        OMS["OnnxModelScorer<br/>hot-reload on model:invalidate"]
+        subgraph Async["async · off the response path §3.4"]
+            FW["Feature-store write<br/>atomic Lua §7.9"]
+            SW["Signal-store update<br/>SignalWriter §8.1"]
+            AUD["Audit sink<br/>RedisStreamTransactionSink"]
+        end
+    end
+
+    subgraph Redis["Redis — one DB · two roles + streams §7.12"]
+        direction TB
+        FEAT[("feature role<br/>aggregates · sets · cfg · reference<br/>bl:accounts · bl:devices")]
+        SIG[("signal role<br/>HLL · counters · bucket hashes")]
+        TXN["stream: txn:events"]
+        LBL["stream: labels:events<br/>+ online label keys"]
+        MET[("metrics counters")]
+        INV(["pub/sub: model:invalidate"])
+    end
+
+    subgraph FB["Feedback loop — Python pipeline/"]
+        direction TB
+        PW["parquet_writer<br/>system of record"]
+        PARQ[("Parquet store<br/>local / GCS")]
+        CB["chargeback_feed<br/>matured labels"]
+        LSTORE["labels · label store"]
+        FAST["fast_loop B6<br/>contain repeats"]
+        RETRAIN["retrain_loop — slow §8.4.2<br/>join · train · export ONNX"]
+        MODEL[("ONNX model<br/>shared path")]
+        AGG["aggregator C1<br/>confusion counters + SSE"]
+        DASH["feedback dashboard §10.3"]
+    end
+
+    %% synchronous scoring path
+    Client --> SC --> FA --> RE --> SCORE --> DEC --> Client
+    SR -.-> RE
+    FA <--> FEAT
+    SR <--> SIG
+    RE -->|SISMEMBER| FEAT
+    SCORE -. uses .-> OMS
+
+    %% off-path writes
+    DEC --> FW --> FEAT
+    DEC --> SW --> SIG
+    DEC --> AUD --> TXN
+
+    %% feedback loop wiring
+    TXN --> PW --> PARQ
+    TXN --> CB --> LSTORE
+    LSTORE --> LBL
+    LSTORE --> PARQ
+    LBL --> FAST -->|write blacklist| FEAT
+    PARQ --> RETRAIN
+    LBL --> RETRAIN
+    RETRAIN --> MODEL
+    RETRAIN -->|publish| INV --> OMS
+    MODEL -. load .-> OMS
+    TXN --> AGG
+    LBL --> AGG
+    AGG --> MET
+    AGG --> DASH
+    DASH -->|apply-feedback| AGG
 ```
-   POST /v1/transactions/score
-              │
-              ▼
-     ScoreController ──────────── idempotent retry short-circuit (§7.8)
-              │
-              ▼
-   Feature assembly  ◄──────────  Redis feature store  (Lettuce, one pipelined
-   (§7.10; degrades §3.5)         aggregates/ring/sets/cfg   batch per request)
-              │
-              ▼
-     Rules engine (cfg:rules) ──▶ Scoring: seed-v0 heuristic, or embedded ML
-              │                   model when fraud.model.enabled=true (§8.3)
-              ▼
-        decision returned
-              │
-   ── async, off the response path ──────────────────────────────
-        │                                        │
-        ▼                                         ▼
-   Feature-store write +                  Signal-store update +
-   signal 24h (atomic Lua, §7.9)          audit sink (§4.3, §3.5)
-   idempotent on transaction_id           HLL/counters (§8.1)
-```
+
+On the laptop, `pipeline/generator.py` + `pipeline/orchestrator.py` stand in for the
+engine fleet (they emit `txn:events` + labels) so the loop can be demonstrated
+end to end; at scale the engine itself is the producer and `retrain_loop`/`fast_loop`
+close the loop from its own scored traffic (§8.4.2, §13.6).
 
 Engine packages (`engine/src/main/java/com/redis/fraud/`):
 
