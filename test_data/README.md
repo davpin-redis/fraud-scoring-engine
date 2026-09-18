@@ -15,12 +15,13 @@ test_data/
     beneficiaries.json       20 beneficiary accounts (2 flagged as mule pattern)
     tpps.json                 5 third-party providers
     blacklists.json          1 blacklisted account, 1 blacklisted device
+    ip_geo.json              IP→geo/ASN reference used by geo/velocity rules
     membership_lists.json    VIP + watchlist customer lists
   config/
     windows.json             last_24h / aged_24h_90d window definitions (§6.1)
     metrics.json              6 metric definitions, incl. the 3 examples from §6.2
-    rules.json                13 rules: 2 hard-block, 1 hard-allow, 10 soft (§8.1);
-                                 R012/R013 read the 90-day transaction hot window (§4.3)
+    rules.json                26 rules (R001–R026): 2 hard-block, 1 hard-allow, 23 soft (§8.1);
+                                 R012/R013 read the 90-day transaction warm window (§4.3)
   transactions/
     historical_backfill.jsonl   482 transactions over the last 10 days
     sample_test_requests.json   11 requests to send after loading, each with
@@ -31,6 +32,10 @@ load_redis.py           loads it all into a local Redis, per §7.3's key schema
 run_sample_requests.py  POSTs sample_test_requests.json to your running
                          Scoring Engine and checks the returned decision
 verify_loader.py         internal check only — not needed to use the fixtures
+seed_feature_store.py   parallel feature-store seeder for VM-scale
+seed_signal_store.py    parallel signal seeder — HLL/counters/stats
+size_feature_store.py   RAM sizing estimator for the feature store
+size_transaction_store.py  RAM sizing estimator for the transaction store
 ```
 
 Everything is anchored to a fixed reference time, `2026-08-10T12:00:00Z`, baked

@@ -1,5 +1,7 @@
 # Implementation Plan — Real-Time Transaction Fraud Scoring System
 
+> **Status (current): all phases 0–6 in this plan are implemented, plus a continuous-learning feedback loop that post-dates this plan (see `FEEDBACK_LOOP_PLAN.md`, `pipeline/`). This document is kept as the original build plan; where it says "next" or "to build", read it as already done. Some class/module names below drifted during implementation — the code under `engine/src/main/java/com/redis/fraud/` is the source of truth.**
+
 Companion to `Fraud_Scoring_System_Design_Doc.md`. This plan turns that design
 into a buildable reference implementation, sequenced so a functional slice
 exists early and each later phase is independently verifiable.
@@ -90,7 +92,7 @@ steady-state scenario meets p50 ≤ 10 ms / p99 ≤ 30 ms on a test deployment.
 
 **Config to honor:** `cfg:windows` (2), `cfg:metrics` (6 — the 3 §6.2 examples
 plus `customer_txn_count_1h`, `bene_distinct_senders_24h`, `pair_txn_count_90d`),
-`cfg:rules` (8 — R001/R002 hard-block, R003 hard-allow, R004–R008 soft).
+`cfg:rules` (26 — R001–R026: 2 hard-block, 1 hard-allow, 23 soft).
 
 **Master data** (`test_data/reference/*.json`) simulates a customer-profile
 store the engine looks up (e.g. `beneficiary_country` for R007), *not* the Redis
@@ -105,11 +107,11 @@ feature store — implement as a `ReferenceDataService` behind an interface.
 | Language / framework | Java 25 (LTS), Spring Boot 4.0 | §3.6 specifies Java/Spring Boot; Java 25 LTS on Spring Boot 4 / Spring Framework 7, virtual threads for the sync path. |
 | Build | Maven | Ubiquitous; matches the Spring Boot skills. |
 | Redis client (feature store, hot path) | Lettuce | Netty-multiplexed: many concurrent pipelined batches share one connection, no per-command pool checkout — the right profile for 1,000+ TPS (burst 5,000) against the 10 ms budget, plus mature Redis Cluster topology handling (§7.3). |
-| Redis client (transaction store) | Jedis, via Redis OM Spring | Object mapping + Query Engine need Jedis; the store is a separate logical DB from the feature store (§7.12), so a second client to a second endpoint is natural, not a smell. |
+| Redis client (transaction store) | Jedis, via Redis OM Spring | Object mapping + Query Engine need Jedis. As built, the transaction/signal store and the feature store default to a single Redis DB — `application.yml` points both `fraud.feature-store.uri` and `fraud.signal-store.uri` at `redis://localhost:6379` (one `redis:8` instance) — but they stay separate logical roles behind distinct clients, so splitting them onto their own endpoint for scale (§7.12) is a config change, not a rewrite. |
 | Hot-path Redis access (feature store) | Lettuce: pipelined/async batch read (§7.10) + single Lua `eval` write (§7.9), hash-tag-aware keys | One round trip each; fits the 10 ms budget. Low-level commands (`HMGET`/`HINCRBY`/`LINDEX`/`SCARD`), not object mapping. |
 | Rules evaluation | Restricted SpEL over a typed feature map | Keeps rules data-driven (matches `cfg:rules` conditions) without hand-rolling a parser; lock down the context. |
-| Embedded model | `seed-v0` heuristic → XGBoost/LightGBM exported to ONNX, run via ONNX Runtime (Java) in-process | §3.6/§8.2; no network hop; artifact shipped with the app. |
-| Transaction Store (hot) | Redis JSON documents via **Redis OM Spring** (`@Document` + `@Indexed`/`@Searchable`, `EntityStream` for search/aggregation), async writer, behind a `TransactionStore` interface | §4.3 wants a low-latency *indexed document* store, not relational; Redis OM Spring gives Spring-idiomatic JSON mapping + the Query Engine (RediSearch) for review/dispute lookups and aggregations, on the same Jedis client. Separate DB from the feature store, so Redis Enterprise Auto Tiering (flash) is available for its 7–14 day window (§7.12 flash exclusion applies only to the feature working set). Cold/warehouse tier stays pluggable behind the interface. |
+| Embedded model | `seed-v0` heuristic → a pure-Python logistic regression trained by `ml/train.py` into `engine/src/main/resources/model/model.json`, consumed in-process by `LinearModelScorer` | §3.6/§8.2; no network hop; artifact shipped with the app. (ONNX / gradient-boosted scoring is the feedback-loop path — `OnnxModelScorer` + `pipeline/export_onnx.py` — not the base model here.) |
+| Transaction Store (hot) | Redis JSON documents via **Redis OM Spring** (`@Document` + `@Indexed`/`@Searchable`, `EntityStream` for search/aggregation), async writer, behind a `TransactionStore` interface | §4.3 wants a low-latency *indexed document* store, not relational; Redis OM Spring gives Spring-idiomatic JSON mapping + the Query Engine (RediSearch) for review/dispute lookups and aggregations, on the same Jedis client. Defaults to the same single Redis DB as the feature store (one `redis:8` on `:6379`), splittable onto its own endpoint for scale — where Redis Enterprise Auto Tiering (flash) is available for its 7–14 day window (§7.12 flash exclusion applies only to the feature working set). Cold/warehouse tier stays pluggable behind the interface. |
 | Metrics | Micrometer → Prometheus + a `/metrics/live` SSE endpoint | Feeds §10 monitoring and the §13.5 live dashboard. |
 | Tests | JUnit 5, Mockito, MockMvc, Testcontainers (`redis:8`) | Per `springboot-tdd`. |
 | Load test | Gatling (Java DSL) | §13.3. |
@@ -122,21 +124,25 @@ feature store — implement as a `ReferenceDataService` behind an interface.
 ```
 engine/                         # Spring Boot service (the synchronous scoring engine)
   src/main/java/com/redis/fraud/
-    api/          ScoreController, ScoreRequest/ScoreResponse DTOs, AuthFilter
-    config/       RedisConfigStore (windows/metrics/rules), read-through cache + Pub/Sub invalidation (§7.2)
-    redis/        LettuceConfig (feature store), KeyBuilder (hash-tag aware), PipelinedReader, LuaWriter
-    feature/      FeatureService + metric readers:
-                    AggregateReader (cnt/sum/sumsq → mean/stddev, §7.4)
-                    PositionalReader (ring buffer, §7.5)
-                    DistinctCountReader (SCARD), PairStateReader, LastEventReader
-                  ReferenceDataService (master-data lookups)
-    rules/        RuleEngine, ConditionEvaluator, RuleResult (block/allow/signal)
-    scoring/      ModelScorer (iface) → SeedV0Heuristic, OnnxGbtScorer
-                  OverrideLayer (§8.3), DecisionBander (half-open bands)
-    store/        TransactionStore (iface) → OmSpringTransactionStore (@Document JSON + Query Engine index/aggregation), AsyncWriter, IdempotencyGuard
+    # (names below reflect the code as built; the plan's original names are noted where they drifted)
+    api/          ScoreController, dto/ (ScoreRequest/ScoreResponse)
+    config/       RedisConfigStore (windows/metrics/rules), MetricDef, RuleDef, WindowDef (read-through cache + Pub/Sub invalidation, §7.2)
+    redis/        RedisConfig (feature store), KeyBuilder (hash-tag aware), LoggingCommandListener, RedisCallLog
+    feature/      FeatureService, FeatureVector, BucketTimes (metric readers + one-batch assembly, §7.4/§7.5)
+    rules/        RuleEngine, ConditionEvaluator, RuleOutcome, FiredRule (block/allow/signal)  # plan called these RuleResult
+    scoring/      ModelScorer (iface) → LinearModelScorer (model.json), OnnxModelScorer (feedback-loop ONNX path)
+                  ScoringService, DecisionBander (half-open bands), ScoreResult
+                  # plan named these SeedV0Heuristic/OnnxGbtScorer + an OverrideLayer; no OverrideLayer was built
+    seed/         seed-v0 heuristic package (the original bootstrap scorer path)
+    signal/       SignalReader/SignalWriter, SignalKeys/SignalNames, SignalTimeSeries, SignalStoreConfig
+    audit/        TransactionSink (iface) → NoOpTransactionSink, RedisStreamTransactionSink; TransactionWriter, ScoredTransaction
+                  # supersedes the plan's store/ + OmSpringTransactionStore; persistence is a stream sink, not OM Spring @Document
+    write/        WritePath, WriteConfig (post-decision Redis write path + idempotency, §7.8–7.9)
+    money/        FxService (ingest currency normalization hook, §3.2/§7.4)
     fallback/     DegradedModeHandler (§3.5)
-    obs/          Metrics (Micrometer), LiveMetricsSseController (§13.5)
-ml/                             # Python offline training → ONNX artifact + model registry
+    obs/          LiveMetricsController, LiveSnapshot, ScoringMetrics (Micrometer + §13.5 live feed)
+ml/                             # Python offline training (train.py) → model.json for LinearModelScorer
+                                #   (ONNX export lives in pipeline/export_onnx.py, the feedback loop)
 loadtest/                       # Gatling simulation + feeders drawn from test_data (§13.3)
 test_data/                      # EXISTS — fixtures + run_sample_requests.py (functional gate)
 load_test_dashboard_mockup.html # EXISTS — repoint from simulation to /metrics/live

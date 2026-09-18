@@ -55,22 +55,27 @@ Engine packages (`engine/src/main/java/com/redis/fraud/`):
 | `scoring` | `ScoringService` (blend + decision bands), `ModelScorer` (toggleable embedded model) |
 | `write` | atomic Lua feature-store write + idempotency guard |
 | `signal` | streaming hot-window signals: `SignalWriter` (updates the 90d signals per txn) + `SignalReader` (reads 24h exact + 90d approximate into the feature vector) on the RAM signal store — HyperLogLog / counters / hashes + **fixed-width bucket hashes with per-field TTL** (`HEXPIRE`) + a capped recent-events list for velocity + behavioural signals (R019–R026). Reads return a bounded, constant field count → constant egress per call |
-| `audit` | `TransactionSink` — every scored txn flows to the durable per-transaction audit "third store" (`NoOpTransactionSink` placeholder) via a resilient async writer |
+| `audit` | `TransactionSink` — every scored txn flows off the response path to the durable audit sink via a resilient async writer. Default `RedisStreamTransactionSink` (`XADD` to the bounded stream `txn:events`, §8.4.1); `NoOpTransactionSink` is the legacy drop-everything fallback (`fraud.audit-sink.type=noop`) |
+| `money` | `FxService` — normalises transaction amounts to the base currency (`fraud.base-currency`, default GBP) for the amount-based signals |
 | `fallback` | graceful degradation (§3.5) |
 | `obs` | Micrometer metrics + `/metrics/live` |
 | `redis`, `config` | Lettuce client / key builder; Redis-backed window/metric/rule config |
 
-**Two RAM Redis databases by design** (§7.12): a **feature store** (`fraud.feature-store.uri`, default `:6379`) for 24h exact signals + aggregates + reference data, and a separate **signal store** (`fraud.signal-store.uri`, default `:6381`) for the 90-day approximate hot-window signals. **Both use Lettuce** (one multiplexed, pipelined connection model — no blocking pool). Signals use **core** Redis types only (HyperLogLog for distinct fan-out/fan-in, counters for repeat declines, count/sum/sumsq hashes for the amount z-score) **plus fixed-width bucket hashes with per-field TTL** (`HEXPIRE`, Redis 8) — one hash per time-shaped signal, field = time-bucket, value = count/sum — for the velocity + behavioural signals (rate-vs-baseline, sustained elevation, circadian, machine cadence, amount bust-out trend, dormancy, device velocity surge, payee inbound velocity surge — R019–R026), with a capped recent-events list for cadence and a last-event marker for dormancy. Because each rollup self-trims to a bounded field count, a read (`HGETALL`) returns a **constant-size** reply regardless of how many transactions the entity has — so egress per scoring call is flat (a hot key costs the same as a quiet one). All keys are hash-tagged by a **high-cardinality** entity (`{cid}`, `{device}`, `{bene}`) so load spreads evenly across shards — no low-cardinality hot key. **No modules needed** on the signal store. (RedisTimeSeries was used in an earlier revision but removed from the scoring path — raw `TS.RANGE` replies grew with sample volume. The earlier Flex/OM-Spring transaction store was also removed — see §8.1.) A separate database per region is a configuration change.
+**One RAM Redis database, two logical roles** (§7.12): a single Redis DB (default `:6379`) holds both the **feature-store** data (`fraud.feature-store.uri` — 24h exact signals + aggregates + reference data) and the **signal-store** data (`fraud.signal-store.uri` — 90-day approximate hot-window signals). Both URIs default to the same DB, so the demo and the GCP deploy run **one** Redis; the two knobs stay separate so the roles *can* be split across two databases to scale them independently (a config change — see §7.12). **Both roles use Lettuce** (one multiplexed, pipelined connection model — no blocking pool). Signals use **core** Redis types only (HyperLogLog for distinct fan-out/fan-in, counters for repeat declines, count/sum/sumsq hashes for the amount z-score) **plus fixed-width bucket hashes with per-field TTL** (`HEXPIRE`, Redis 8) — one hash per time-shaped signal, field = time-bucket, value = count/sum — for the velocity + behavioural signals (rate-vs-baseline, sustained elevation, circadian, machine cadence, amount bust-out trend, dormancy, device velocity surge, payee inbound velocity surge — R019–R026), with a capped recent-events list for cadence and a last-event marker for dormancy. Because each rollup self-trims to a bounded field count, a read (`HGETALL`) returns a **constant-size** reply regardless of how many transactions the entity has — so egress per scoring call is flat (a hot key costs the same as a quiet one). All keys are hash-tagged by a **high-cardinality** entity (`{cid}`, `{device}`, `{bene}`) so load spreads evenly across shards — no low-cardinality hot key. **No modules needed** on the signal store. (RedisTimeSeries was used in an earlier revision but removed from the scoring path — raw `TS.RANGE` replies grew with sample volume. The earlier Flex/OM-Spring transaction store was also removed — see §8.1.) A separate database per region is a configuration change.
 
 ## Repository layout
 
 ```
 engine/                 Spring Boot scoring engine (the service)
+pipeline/               Continuous-learning feedback loop (Python): generator, Parquet
+                        writer, aggregator/dashboard SSE, fast + retrain loops, ONNX export
+deploy/                 GCP deploy scaffolding (redis-ent-wizard design + VM run/seed scripts)
 loadtest/               Gatling load test (§13.3)
 ml/                     Offline model training (train.py) -> engine/.../model/model.json
 test_data/              Laptop-scale fixtures + loader + functional checker
-docker-compose.yml      two Redis DBs (feature :6379, signal :6381) for local dev
+docker-compose.yml      one Redis DB (:6379, feature + signal roles) for local dev
 load_test_dashboard_mockup.html   Live load-test dashboard (§13.5)
+feedback_dashboard_mockup.html    Live feedback-loop dashboard (§10.3)
 ```
 
 ## Prerequisites
@@ -82,7 +87,7 @@ load_test_dashboard_mockup.html   Live load-test dashboard (§13.5)
 | Python | 3.10+ | For the fixture loader and functional checker. |
 | Maven | not needed | Use the bundled wrapper `engine/mvnw`. |
 
-> **No Redis modules required.** Both stores use only core Redis types
+> **No Redis modules required.** Both roles use only core Redis types
 > (String/Hash/Set/HyperLogLog), so any recent Redis works. The provided
 > `docker-compose.yml` uses `redis:8`.
 
@@ -101,11 +106,11 @@ All commands are run from the repository root unless noted.
 ```bash
 docker compose up -d
 ```
-This starts **two** Redis databases: the feature store on `localhost:6379` and
-the signal store on `localhost:6381`. If those ports are in use, edit the `ports`
-mappings in `docker-compose.yml` and pass the new locations to the engine
-(`fraud.feature-store.uri` / `fraud.signal-store.uri`) and to the loader
-(`--redis-url`, feature store) shown below.
+This starts **one** Redis database on `localhost:6379`, serving both the feature
+and signal roles. If that port is in use, edit the `ports` mapping in
+`docker-compose.yml` and pass the new location to the engine
+(`fraud.feature-store.uri` / `fraud.signal-store.uri`, both default `:6379`) and to
+the loader (`--redis-url`) shown below.
 
 ### 2. Load the seed fixtures
 The loader needs the `redis` Python package:
@@ -114,10 +119,10 @@ python3 -m venv .venv && . .venv/bin/activate && pip install redis
 python3 test_data/load_redis.py --flush
 ```
 This replays the 482-transaction backfill through the write-path logic so the
-feature store is warm (velocity aggregates, ring buffers, blacklists, reference
-profiles/IP-geo, and the `cfg:*` config), not empty. It targets the **feature
-store** DB (`--redis-url`, default `redis://localhost:6379`); the transaction
-store fills at runtime as the engine scores. See
+feature-role data is warm (velocity aggregates, ring buffers, blacklists, reference
+profiles/IP-geo, and the `cfg:*` config), not empty. It targets the Redis DB
+(`--redis-url`, default `redis://localhost:6379`); the 90-day signal data fills at
+runtime as the engine scores. See
 [`test_data/README.md`](test_data/README.md) for the encoded scenarios.
 
 > The hot-window rules **R012** (repeat declines) and **R013** (beneficiary fan-out)
@@ -143,9 +148,9 @@ Or run the packaged jar (build it with `./mvnw package -DskipTests`):
 ```bash
 java -jar engine/target/fraud-scoring-engine-0.0.1-SNAPSHOT.jar
 ```
-The service listens on `http://localhost:8080` by default and connects to the
-feature store (`redis://localhost:6379`) and the signal store
-(`redis://localhost:6381`). Both must be reachable at startup.
+The service listens on `http://localhost:8080` by default and connects to Redis
+(`redis://localhost:6379`) for both the feature and signal roles; it must be
+reachable at startup.
 
 > Reference/master data (customer & beneficiary profiles, IP-geo) is read from
 > Redis, populated by the fixture loader in step 2 — the engine reads no local
@@ -158,7 +163,7 @@ pre-warm the 90-day signals so R012/R013/R005/amount fire from the first request
 (HyperLogLog fan-out/fan-in, declines counters, amount stats) in parallel:
 ```bash
 python3 test_data/seed_signal_store.py \
-  --host localhost --port 6381 --customers 5000 --flagged 20 --id-width 3 --procs 8
+  --host localhost --port 6379 --customers 5000 --flagged 20 --id-width 3 --procs 8
 ```
 `--flagged N` makes `cust_1..cust_N` high-risk (≥3 declines, >15 distinct
 beneficiaries) so R012/R013 fire for them. **`--id-width 3` and `--customers` must
@@ -194,6 +199,11 @@ python3 -m http.server 8090        # from the repo root
 Open **http://localhost:8090/load_test_dashboard_mockup.html?live=http://localhost:8080**.
 The `/metrics/live` endpoint is CORS-open so the dashboard can read it.
 
+The continuous-learning feedback loop has its own live dashboard,
+`feedback_dashboard_mockup.html` (§10.3), served the same way and fed by the
+pipeline's metrics aggregator (SSE); see [`FEEDBACK_LOOP_PLAN.md`](FEEDBACK_LOOP_PLAN.md)
+and `pipeline/` for how to run the loop end to end.
+
 ---
 
 ## Configuration
@@ -204,12 +214,12 @@ Pass as `--flag=value` (jar) or `-Dspring-boot.run.arguments=--flag=value`
 | Property | Default | Purpose |
 |---|---|---|
 | `server.port` | `8080` | HTTP port. |
-| `fraud.feature-store.uri` | `redis://localhost:6379` | RAM feature store (Lettuce). |
-| `fraud.signal-store.uri` | `redis://localhost:6381` | RAM signal store (Lettuce): 90-day hot-window signals — HyperLogLog / counters / hashes (R005/R012/R013/R018) + fixed-width bucket hashes with per-field TTL (`HEXPIRE`) + capped events list for velocity + behavioural rules (R017/R019–R026). Core types only, no modules; bounded constant-size reads. Replaces the old Flex transaction store. |
-| `fraud.redis.log-calls` | `true` | Log one line per Redis call (command type + latency) for both stores. Verbose at high TPS — set `false` for a full-scale load run. |
+| `fraud.feature-store.uri` | `redis://localhost:6379` | Redis DB for the feature role (Lettuce): 24h exact signals + aggregates + reference data. |
+| `fraud.signal-store.uri` | `redis://localhost:6379` | Redis DB for the signal role (Lettuce): 90-day hot-window signals — HyperLogLog / counters / hashes (R005/R012/R013/R018) + fixed-width bucket hashes with per-field TTL (`HEXPIRE`) + capped events list for velocity + behavioural rules (R017/R019–R026). Core types only, no modules; bounded constant-size reads. **Defaults to the same DB as the feature role** — point it at a different host:port to split the two roles across databases for independent scaling. |
+| `fraud.redis.log-calls` | `true` | Log one line per Redis call (command type + latency) for both roles. Verbose at high TPS — set `false` for a full-scale load run. |
 | *(reference data)* | — | Customer/beneficiary profiles and IP-geo are **loaded into Redis** by the fixture loader (`load_redis.py`, §7.2) and read from there; the engine has no reference-data file path. |
 | `fraud.model.enabled` | `false` | `true` loads and calls the embedded model; `false` bypasses it entirely. |
-| `fraud.seed.*` | *(see §13.2)* | Transaction-store seeder job, active only under `--spring.profiles.active=seed`: `customers`, `days`, `txns-per-customer`, `flagged`, `id-format`, `customer-start`, `flush`, plus throughput knobs `writers` (32) and `pipeline` (1000). |
+| *(transaction-store seeding)* | — | Large-scale seeding runs out-of-process via the Python scripts under `test_data/` (`seed_feature_store.py` / `seed_signal_store.py`, §13.2), not the engine. A legacy in-engine `seed` Spring profile (`fraud.seed.*`) was removed; `application-seed.yml` is a leftover stub. |
 
 ### Observability endpoints
 - `GET /actuator/health` — liveness/readiness.
@@ -218,13 +228,13 @@ Pass as `--flag=value` (jar) or `-Dspring-boot.run.arguments=--flag=value`
 
 ### Per-Redis-call latency logging
 With `fraud.redis.log-calls=true` (default), the engine logs one line per Redis
-call on both stores, e.g.:
+call, tagged by role (`store=feature` / `store=signal`), e.g.:
 ```
 redis-call store=feature op=HMGET took_ms=0.42
 redis-call store=signal op=PFCOUNT took_ms=0.31
 redis-call store=signal op=PFADD took_ms=0.12
 ```
-Both stores use Lettuce, so their commands are captured at the driver level (a
+Both roles use Lettuce, so their commands are captured at the driver level (a
 `CommandListener`, one line per command in a pipelined batch with its own latency).
 Latency is measured with
 `System.nanoTime()` around issue→result. Silence it without disabling entirely via
@@ -266,37 +276,37 @@ production (§13.4).
 
 | Role | VM(s) | Notes |
 |---|---|---|
-| Redis (feature store) | RAM BDB | Redis / Redis Enterprise, sized per §7.12 (~120 GB for 5M). Plain Redis — no modules. |
-| Redis (signal store) | RAM BDB | Separate plain-Redis DB for the 90d approximate signals (HyperLogLog / counters / stats — core types, no modules, no flash). Bounded RAM. |
+| Redis (feature + signal) | RAM BDB | One RAM Redis / Redis Enterprise DB holding both roles — 24h exact aggregates + reference data **and** the 90d approximate signals (HyperLogLog / counters / stats — core types, no modules, no flash). Sized per §7.12 (~200 GB for 5M). Split the roles across two DBs only to scale them independently. |
 | Scoring engine | 1–N behind a load balancer | Stateless (§3.6), so scale horizontally. JDK 25. |
 | Load generator | 1 | JDK 25 + this repo's `loadtest/`. |
 
 See [`LOAD_TEST_RUNBOOK.md`](LOAD_TEST_RUNBOOK.md) for the full GCP runbook (LB setup,
 firewall, per-VM commands). Summary of the steps:
 
-1. **Redis:** provision the two RAM databases — feature store + signal store. Note both host/ports.
-2. **Seed the feature store:** config + blacklists via `load_redis.py`, then the 5M-customer
+1. **Redis:** provision the one RAM database (both roles share it). Note its host/port.
+2. **Seed the feature role:** config + blacklists via `load_redis.py`, then the 5M-customer
    footprint via the parallel `seed_feature_store.py` (see the runbook §3):
    ```bash
-   python3 test_data/load_redis.py --flush --redis-url redis://<feature-db-host>:6379
-   python3 test_data/seed_feature_store.py --host <feature-db-host> --port 6379 \
+   python3 test_data/load_redis.py --flush --redis-url redis://<redis-host>:6379
+   python3 test_data/seed_feature_store.py --host <redis-host> --port 6379 \
      --customers 5000000 --id-width 3 --procs 12
    ```
-2b. **Pre-warm the signal store (for R012/R013/R005):** so the hot-window rules fire from
-   the first request. Parallel, matching the Gatling identity space (`cust_%03d`):
+2b. **Pre-warm the signal role (for R012/R013/R005):** so the hot-window rules fire from
+   the first request. Same DB, parallel, matching the Gatling identity space (`cust_%03d`):
    ```bash
-   python3 test_data/seed_signal_store.py --host <signal-db-host> --port 6381 \
+   python3 test_data/seed_signal_store.py --host <redis-host> --port 6379 \
      --customers 5000000 --flagged 50000 --id-width 3 --procs 12
    ```
    No index to build, no document store to size — the signals are bounded core-type
    structures. Shard across VMs with `--customer-start` + `--total-customers`.
-3. **Engine:** on each engine VM, deploy the jar and start it against the two stores:
+3. **Engine:** on each engine VM, deploy the jar and start it against Redis (both URIs
+   point at the same DB):
    ```bash
    java -Xms4g -Xmx4g -XX:+UseZGC \
      -jar fraud-scoring-engine-0.0.1-SNAPSHOT.jar \
      --server.port=8080 \
-     --fraud.feature-store.uri=redis://<feature-db-host>:6379 \
-     --fraud.signal-store.uri=redis://<signal-db-host>:6381 \
+     --fraud.feature-store.uri=redis://<redis-host>:6379 \
+     --fraud.signal-store.uri=redis://<redis-host>:6379 \
      --fraud.redis.log-calls=false
    ```
    Put the engine VMs behind a load balancer and use its URL as `baseUrl` below.

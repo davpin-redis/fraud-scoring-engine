@@ -1,7 +1,7 @@
 # Fraud Scoring — Load Test Runbook (GCP)
 
 Step-by-step to configure and run the load test against the fraud-scoring engine
-and its two RAM Redis stores. (The Flex transaction store has been removed — the
+and its RAM Redis store. (The Flex transaction store has been removed — the
 90-day hot-window signals are now computed as streaming signals on a plain-Redis
 signal store; there are **no search indexes** to create anymore.)
 
@@ -11,9 +11,8 @@ You have already provisioned:
 
 | Component | Setup |
 |---|---|
-| **Feature store cluster** | 3× `n2d-highmem-8`, no disks, 9 shards, all-master (no HA). Holds 24h exact signals + aggregates + reference. **Plain Redis — no modules required.** |
-| **Signal store cluster** | 3× `n2d-highmem-8`, no disks, all-master (no HA). Holds 90d signals: HyperLogLog / counters / hashes + **fixed-width bucket hashes with per-field TTL** (`HEXPIRE`) + a capped events list (velocity + behavioural rules R017/R019–R026). **Core types only — no modules.** Bounded constant-size reads. No flash. |
-| **Engine VMs** | 3× `e2-standard-8`, JDK 25 installed. |
+| **Redis store cluster** | One 3-node Redis Enterprise cluster, a single 200 GB database, 12 primary shards, all-master (no HA), on `:6379`. Serves **both** feature + signal roles: 24h exact signals + aggregates + reference **and** the 90d signals: HyperLogLog / counters / hashes + **fixed-width bucket hashes with per-field TTL** (`HEXPIRE`) + a capped events list (velocity + behavioural rules R017/R019–R026). **Plain Redis / core types only — no modules required.** Bounded constant-size reads. No flash. |
+| **Engine VMs** | 5× `e2-standard-8`, JDK 25 installed. |
 | **Gatling VM** | 1× `e2-standard-8`, JDK 25 installed. |
 
 > The signal store is now RAM-only and **bounded** (a few KB per entity: HLLs cap at
@@ -23,35 +22,33 @@ You have already provisioned:
 > read returns a bounded, constant-size reply (flat egress under soak).
 
 **This runbook covers what's left:** the engine **load balancer**, engine
-deploy/config, loading + pre-warming the two stores, and running/monitoring the test.
+deploy/config, loading + pre-warming the store, and running/monitoring the test.
 
 Record these values up front — you'll paste them into the commands below:
 
 ```
-FEATURE_HOST=<feature-store db endpoint host>
-FEATURE_PORT=<feature-store db port>        # e.g. 12000
-SIGNAL_HOST=<signal-store db endpoint host>
-SIGNAL_PORT=<signal-store db port>          # e.g. 13000
+REDIS_HOST=<redis db endpoint host>          # one Redis serving both feature + signal roles
+REDIS_PORT=<redis db port>                   # e.g. 6379
 REDIS_PASS=<db password, or empty if none>
 CUSTOMERS=5000000     HIGH_RISK=50000       # full scale; must match across both seeders + Gatling
-SEED_DAYS=90                                # feature-store history depth (biggest seed-time lever)
+SEED_DAYS=30                                # feature-store history depth (biggest seed-time lever)
 VPC=<vpc network>   SUBNET=<subnet>   REGION=<region>   ZONE=<zone>
 ```
 
-> **No-HA reminder:** these clusters have no replica. A node loss = permanent data
+> **No-HA reminder:** this cluster has no replica. A node loss = permanent data
 > loss for its shards. Fine for a load test; enable AOF/backups before anything real.
 
 ---
 
 ## 1. Prerequisites per VM
 
-- **Engine VMs (×3):** JDK 25; the engine jar (built in step 2).
+- **Engine VMs (×5):** JDK 25; the engine jar (built in step 2).
 - **Gatling VM:** JDK 25; a clone of this repo (for `loadtest/` + `engine/mvnw`).
-- **Loader** (run from any VM that can reach both stores): `python3` + `pip install redis`.
+- **Loader** (run from any VM that can reach the store): `python3` + `pip install redis`.
 - **Firewall rules** (create if not present):
   - Engine VMs: allow ingress `tcp:8080` from the LB + the GCP health-check ranges
     `35.191.0.0/16` and `130.211.0.0/22`.
-  - Engine VMs → Redis: allow egress to `FEATURE_PORT` / `SIGNAL_PORT`.
+  - Engine VMs → Redis: allow egress to `REDIS_PORT`.
   - Gatling VM → LB VIP: allow `tcp:8080`.
 
 ---
@@ -64,7 +61,7 @@ cd engine
 # produces engine/target/fraud-scoring-engine-0.0.1-SNAPSHOT.jar
 ```
 
-Copy the jar to each of the 3 engine VMs:
+Copy the jar to each of the 5 engine VMs:
 
 ```bash
 gcloud compute scp engine/target/fraud-scoring-engine-0.0.1-SNAPSHOT.jar \
@@ -82,7 +79,7 @@ on startup):
 pip install redis   # once
 python3 test_data/generate_test_data.py     # (re)generate fixtures if not present
 python3 test_data/load_redis.py --flush \
-  --redis-url redis://${REDIS_PASS:+:$REDIS_PASS@}$FEATURE_HOST:$FEATURE_PORT
+  --redis-url redis://${REDIS_PASS:+:$REDIS_PASS@}$REDIS_HOST:$REDIS_PORT
 ```
 
 **3b. Bulk-load the 5M customers' footprint** — `seed_feature_store.py` is
@@ -90,16 +87,16 @@ multiprocessing (one worker process per core, deep pipelines, so it bypasses the
 and saturates the cluster's write path). Run **without** `--flush` so it keeps the
 config from 3a. Set `--procs` to `nproc-1` on the seeder VM.
 
-This is the heavy seed: 5M customers × `SEED_DAYS` ≈ **~10 billion write ops** at 90
-days (~1,940 ops/customer; the daily buckets are ~82% of that, so `SEED_DAYS` is the
-big lever). **Shard it across several seeder VMs in the same VPC** (low RTT to Redis)
+This is the heavy seed: 5M customers × `SEED_DAYS` ≈ **~4.5 billion write ops** at the
+default 30 days (~900 ops/customer; the daily buckets dominate, so `SEED_DAYS` is the
+big lever — the full 90-day depth is ~10 billion). **Shard it across several seeder VMs in the same VPC** (low RTT to Redis)
 over disjoint `--customer-start` ranges, all passing the same `--total-customers`:
 
 ```bash
 # 4-VM shard (each on its own high-core seeder VM). --total-customers keeps the
 # per-customer bene-pool + extrapolation identical across shards.
 # VM 1:
-python3 test_data/seed_feature_store.py --host $FEATURE_HOST --port $FEATURE_PORT \
+python3 test_data/seed_feature_store.py --host $REDIS_HOST --port $REDIS_PORT \
   ${REDIS_PASS:+--password $REDIS_PASS} --id-width 3 --days $SEED_DAYS --procs 15 \
   --total-customers 5000000 --customer-start 0        --customers 1250000
 # VM 2:  --customer-start 1250000 --customers 1250000
@@ -110,9 +107,9 @@ python3 test_data/seed_feature_store.py --host $FEATURE_HOST --port $FEATURE_POR
 Single VM (dev / smaller runs): drop the shard args and pass `--customers $CUSTOMERS`.
 
 **Throughput / time:** each 15-proc seeder VM sustains ~0.3–0.6M ops/s against a
-same-VPC RAM cluster, so 4 VMs ≈ ~1.5–2.4M ops/s → **~1.5 h for the full 90-day, 5M
-seed**; a single VM is ~5–9 h. `--days 30` cuts the op count ~55% (~40 min on 4 VMs);
-`--days 7` cuts it ~77%. Watch the feature store's `used_memory` climb to ~120 GB.
+same-VPC RAM cluster, so 4 VMs ≈ ~1.5–2.4M ops/s → **~40 min for the default 30-day, 5M
+seed** on 4 VMs; a single VM is ~2–4 h. The full `--days 90` is ~2× the op count (~1.5 h on 4 VMs, ~5–9 h single VM);
+`--days 7` cuts it ~50% below the 30-day baseline. Watch the feature store's `used_memory` climb to ~55 GB.
 
 > Order matters: `load_redis.py --flush` first (owns the one flush), then
 > `seed_feature_store.py` **without** `--flush`. The seeders write per-customer data
@@ -129,7 +126,7 @@ amount stats) for the current rotating month:
 
 ```bash
 python3 test_data/seed_signal_store.py \
-  --host $SIGNAL_HOST --port $SIGNAL_PORT ${REDIS_PASS:+--password $REDIS_PASS} \
+  --host $REDIS_HOST --port $REDIS_PORT ${REDIS_PASS:+--password $REDIS_PASS} \
   --customers $CUSTOMERS --flagged $HIGH_RISK --id-width 3 --procs 12
 ```
 
@@ -150,7 +147,7 @@ needed at 5M.
 
 ---
 
-## 5. Deploy + start the engine on each of the 3 VMs
+## 5. Deploy + start the engine on each of the 5 VMs
 
 Set `log-calls=false` (per-call logging is far too verbose at load). Note: **no
 transaction-store / `spring.data.redis` / `hot-window` flags anymore** — just the two
@@ -160,8 +157,8 @@ store URIs.
 java -Xms4g -Xmx4g -XX:+UseZGC \
   -jar ~/fraud-engine.jar \
   --server.port=8080 \
-  --fraud.feature-store.uri=redis://${REDIS_PASS:+:$REDIS_PASS@}$FEATURE_HOST:$FEATURE_PORT \
-  --fraud.signal-store.uri=redis://${REDIS_PASS:+:$REDIS_PASS@}$SIGNAL_HOST:$SIGNAL_PORT \
+  --fraud.feature-store.uri=redis://${REDIS_PASS:+:$REDIS_PASS@}$REDIS_HOST:$REDIS_PORT \
+  --fraud.signal-store.uri=redis://${REDIS_PASS:+:$REDIS_PASS@}$REDIS_HOST:$REDIS_PORT \
   --fraud.redis.log-calls=false \
   --fraud.model.enabled=false
 ```
@@ -175,8 +172,8 @@ After=network-online.target
 [Service]
 ExecStart=/usr/bin/java -Xms4g -Xmx4g -XX:+UseZGC -jar /home/%i/fraud-engine.jar \
   --server.port=8080 \
-  --fraud.feature-store.uri=redis://FEATURE_HOST:FEATURE_PORT \
-  --fraud.signal-store.uri=redis://SIGNAL_HOST:SIGNAL_PORT \
+  --fraud.feature-store.uri=redis://REDIS_HOST:REDIS_PORT \
+  --fraud.signal-store.uri=redis://REDIS_HOST:REDIS_PORT \
   --fraud.redis.log-calls=false
 Restart=on-failure
 [Install]
@@ -202,10 +199,10 @@ gcloud compute health-checks create http engine-hc \
   --port=8080 --request-path=/actuator/health \
   --check-interval=5s --healthy-threshold=2 --unhealthy-threshold=3
 
-# 6.2 Unmanaged instance group with the 3 engine VMs
+# 6.2 Unmanaged instance group with the 5 engine VMs
 gcloud compute instance-groups unmanaged create engine-ig --zone=$ZONE
 gcloud compute instance-groups unmanaged add-instances engine-ig --zone=$ZONE \
-  --instances=engine-vm-1,engine-vm-2,engine-vm-3
+  --instances=engine-vm-1,engine-vm-2,engine-vm-3,engine-vm-4,engine-vm-5
 gcloud compute instance-groups set-named-ports engine-ig --zone=$ZONE \
   --named-ports=http:8080
 
@@ -247,7 +244,7 @@ ulimit -n 1048576
 `baseUrl` = the LB VIP. `-Dcustomers`/`-DhighRisk` **must match** the seeders'
 `--customers`/`--flagged`. Run the full-scale test in three steps:
 
-**1) Warm-up ramp (0 → 1000 TPS over 2 min)** — confirms the LB + all 3 engines take
+**1) Warm-up ramp (0 → 1000 TPS over 2 min)** — confirms the LB + all 5 engines take
 load cleanly and finds any early ceiling before the sustained run:
 ```bash
 engine/mvnw -f loadtest/pom.xml -DbaseUrl=http://$LB_VIP:8080 \
@@ -289,11 +286,11 @@ Watch: `p99_ms` vs SLA, `degraded` (should stay 0), decision mix, per-rule fires
 (`R012`/`R013`/`R005` non-zero → the signal pre-warm is working; `R014`–`R018` fire
 under load as 24h/velocity/amount signals build up).
 
-**Redis (both stores)** — plain Redis now, so watch memory + ops with `redis-cli`
+**Redis** — plain Redis now, so watch memory + ops with `redis-cli`
 (or the Enterprise console / `:9443` REST API):
 ```bash
-redis-cli -h $SIGNAL_HOST -p $SIGNAL_PORT ${REDIS_PASS:+-a $REDIS_PASS} INFO stats | grep instantaneous_ops
-redis-cli -h $SIGNAL_HOST -p $SIGNAL_PORT ${REDIS_PASS:+-a $REDIS_PASS} INFO memory | grep used_memory:
+redis-cli -h $REDIS_HOST -p $REDIS_PORT ${REDIS_PASS:+-a $REDIS_PASS} INFO stats | grep instantaneous_ops
+redis-cli -h $REDIS_HOST -p $REDIS_PORT ${REDIS_PASS:+-a $REDIS_PASS} INFO memory | grep used_memory:
 ```
 The signal store is bounded RAM (no index, no flash) — memory should stay flat/small
 relative to the feature store. `evicted_keys` should stay 0.
@@ -318,17 +315,16 @@ accurate than the earlier estimates.
 
 | Tier | VMs | Shards | Measured basis (extrapolated to 5M) |
 |---|---|---|---|
-| **Feature store** (RAM) | **3× `n2d-highmem-8`** (8 vCPU / 64 GB = 192 GB) | **9 master** | **20.6 KB/customer × 5M ≈ ~105 GB** (~55% util); reads are trivial RAM lookups |
-| **Signal store** (RAM, core types) | **3× `n2d-highmem-8`** (8 vCPU / 64 GB = 192 GB) | **9 master** | **< 20 GB** = HLL/counters/z-score hash (~0.35 KB/cust ≈ 1.8 GB) + bounded bucket hashes + capped events list (~1–3 KB/active cust). Far lower than the earlier TimeSeries estimate (~90 GB) — the bucket hashes hold only fixed windows, not full-resolution series. Comfortable headroom; single-node would suffice on RAM, keep 3×/9-shard for CPU + HA. |
-| **Engine** | **3× `e2-standard-4`** (4 vCPU / 16 GB) behind an internal L4 LB | — | **~1.1 ms CPU/txn** (measured) → ~1.1 core @ 1000 tx/s → ~0.4 core/VM; 3 VMs for LB + N+1 + burst headroom. `-Xmx2g` |
+| **Redis store** (RAM, core types) | **3-node Redis Enterprise cluster** (`n2d-highmem-16`, 16 vCPU / 128 GB each = 384 GB) | **12 primary** | one **200 GB no-HA database** serving both roles: feature ~55 GB (`--days 30`, 20.6 KB/customer) + signal < 20 GB (HLL/counters/z-score hash + bounded bucket hashes + capped events list) + cached decisions/streams ≈ **~115 GB working set** (~65% util). Bucket hashes hold fixed windows, not full-resolution series, so both RAM and per-call egress stay bounded. |
+| **Engine** | **5× `e2-standard-8`** (8 vCPU / 32 GB) behind an internal L4 LB | — | **~1.1 ms CPU/txn** (measured) → ~1.1 core @ 1000 tx/s → ~0.2 core/VM; 5 VMs for LB + N+1 + burst headroom. `-Xmx4g` |
 | **Gatling** | **1× `e2-standard-8`** (transient) | — | tune sysctl (§7); **2 injectors** for the 4k burst scenario |
 
 Sizing notes:
-- **The engine is far lighter than first estimated** — measured ~1.1 ms CPU/txn (not ~5–7), so 1000 tx/s needs only ~1 core total. `e2-standard-4` ×3 is generous; the 3 VMs are for availability/LB/burst, not raw throughput. Heap drops to `-Xmx2g` (working set is small).
+- **The engine is far lighter than first estimated** — measured ~1.1 ms CPU/txn (not ~5–7), so 1000 tx/s needs only ~1 core total. `e2-standard-8` ×5 is generous; the 5 VMs are for availability/LB/burst, not raw throughput. Heap is `-Xmx4g` (matching the deploy profile; the working set itself is small).
 - **The signal store is no longer a RAM driver.** Replacing the per-customer velocity/amount TimeSeries (which grew to ~90 GB and, worse, returned ever-larger `TS.RANGE` replies under soak) with fixed-width bucket hashes bounds both RAM and per-call egress: each customer holds ≤ ~170 hourly + ≤ 24 five-min velocity buckets, ≤ 8 weekly amount buckets, a ≤ 64-element events list, and a last-event marker — all self-trimming via per-field TTL. The amount z-score still comes from the count/sum/sumsq monthly hash; R023 bust-out trend now reads the small weekly bucket hashes.
 - **No-HA / single copy.** For HA, add one replica per shard → ~2× the Redis node count.
-- **Burst 4–5k tx/s:** the engine is stateless — scale to 5–6 VMs; both Redis tiers have ample headroom. Signal-store reads are now bounded constant-size `HGETALL`s (no growing `TS.RANGE`), so per-call cost is flat; watch per-shard CPU for key-skew, not reply growth.
-- **Approx cost** (GCP on-demand, us-central1): ~$1.9k/mo (feature ~$0.7k + signal ~$0.7k + engines ~$0.3k + Gatling ~$0.2k); ~**$1.2k/mo with a 1-yr CUD**. Verify in the pricing calculator.
+- **Burst 4–5k tx/s:** the engine is stateless — scale to 7–8 VMs; the Redis store has ample headroom. Signal reads are now bounded constant-size `HGETALL`s (no growing `TS.RANGE`), so per-call cost is flat; watch per-shard CPU for key-skew, not reply growth.
+- **Approx cost** (GCP on-demand, europe-west1): ~$2.6k/mo (Redis cluster ~$1.4k + engines ~$1.0k + Gatling ~$0.2k); ~**$1.7k/mo with a 1-yr CUD**. Verify in the pricing calculator.
 
 ---
 
@@ -336,8 +332,8 @@ Sizing notes:
 
 | Setting | Where | Value |
 |---|---|---|
-| Feature store endpoint | engine flag `--fraud.feature-store.uri` | `redis://[:pass@]FEATURE_HOST:FEATURE_PORT` |
-| Signal store endpoint | engine flag `--fraud.signal-store.uri` | `redis://[:pass@]SIGNAL_HOST:SIGNAL_PORT` |
+| Feature store endpoint | engine flag `--fraud.feature-store.uri` | `redis://[:pass@]REDIS_HOST:REDIS_PORT` (one Redis, both roles) |
+| Signal store endpoint | engine flag `--fraud.signal-store.uri` | `redis://[:pass@]REDIS_HOST:REDIS_PORT` (same Redis) |
 | Per-call Redis logging | engine flag `--fraud.redis.log-calls` | **`false`** for load runs |
 | ML model | engine flag `--fraud.model.enabled` | `false` (rules-only) |
 | JVM | `java` args | `-Xms4g -Xmx4g -XX:+UseZGC` |

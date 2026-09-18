@@ -24,7 +24,7 @@ cp deploy/run_engine.sh deploy/seed.sh "$STAGE/deploy/"
 tar --no-xattrs -czf "$OUT/engine.tar.gz" -C "$STAGE" .
 # pipeline / gatling source tarballs
 tar --no-xattrs -czf "$OUT/pipeline.tar.gz" --exclude='__pycache__' --exclude='pipeline/data' pipeline deploy/run_pipeline.sh
-tar --no-xattrs -czf "$OUT/gatling.tar.gz"  --exclude='loadtest/target' loadtest deploy/run_gatling.sh
+tar --no-xattrs -czf "$OUT/gatling.tar.gz"  --exclude='loadtest/target' loadtest deploy/run_gatling.sh deploy/seed_all.sh
 # upload_artifact(path, "binary") for each; set the returned id as the app's artifact.ref
 ```
 Each app's command is `tar xzf <name>.tar.gz 2>/dev/null; bash deploy/run_<app>.sh` (gatling stages
@@ -32,7 +32,9 @@ then idles instead) — self-healing whether or not the wizard auto-extracts the
 **Verify the extraction behaviour in the review UI** (the one artifact-handling assumption).
 
 ## Wiring the apps get (injected env → flags, via the wrappers)
-- engine / pipeline: `REDIS_FRAUD_ENDPOINT` (Redis DB host:port), `GCS_FRAUD_DATA_URL` (bucket).
+- engine / pipeline: `REDIS_FRAUD_ENDPOINT` (Redis DB host:port) — the only injected var the
+  wrappers turn into flags. `GCS_FRAUD_DATA_URL`/`GCS_FRAUD_DATA_BUCKET` are also injected into
+  the environment (durable archive path) but the wrappers do **not** convert them to flags.
   `run_engine.sh` also writes `redis.env` so `seed.sh` can reach Redis when run by hand.
 - gatling: `LB_ENGINE_LB_ENDPOINT` — persisted to `gatling.env` at boot for the manual launcher.
 
@@ -45,7 +47,7 @@ bundled on the gatling VM. It discovers the engine VMs (`NAME_FILTER=engine`), t
 into each (IAP) and runs its shard in parallel; the first VM (shard 0) also loads cfg + reference
 data + flagged ids:
 ```bash
-bash deploy/seed_all.sh                    # knobs: PROJECT NAME_FILTER ENGINES SHARDS TOTAL DAYS FLAGGED0
+bash deploy/seed_all.sh                    # knobs: PROJECT NAME_FILTER ENGINES APP_DIR SHARDS TOTAL DAYS FLAGGED0
 ```
 Prereq: the box you run it from needs the Cloud SDK and rights to list the engines, IAP-tunnel,
 and SSH to them. If you run it **on the gatling VM**, grant that VM's service account
