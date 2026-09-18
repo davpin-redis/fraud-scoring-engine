@@ -5,6 +5,13 @@ and its RAM Redis store. (The Flex transaction store has been removed — the
 90-day hot-window signals are now computed as streaming signals on a plain-Redis
 signal store; there are **no search indexes** to create anymore.)
 
+Sections §0–§9 cover the **plain load test** (engine + Redis + Gatling). To also run
+the **continuous-learning feedback loop** — the `pipeline/` services (audit-stream
+Parquet writer, label feed, fast + slow retrain loops, and the aggregator/dashboard)
+alongside the engine — jump to the **[Feedback-loop run](#feedback-loop-run-large-scale-5m--1000-txs)**
+section near the end; the laptop-scale version of that loop is in the README (step 8)
+and `FEEDBACK_LOOP_PLAN.md`.
+
 ## 0. Starting assumptions (already done)
 
 You have already provisioned:

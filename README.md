@@ -257,10 +257,44 @@ python3 -m http.server 8090        # from the repo root
 Open **http://localhost:8090/load_test_dashboard_mockup.html?live=http://localhost:8080**.
 The `/metrics/live` endpoint is CORS-open so the dashboard can read it.
 
-The continuous-learning feedback loop has its own live dashboard,
-`feedback_dashboard_mockup.html` (§10.3), served the same way and fed by the
-pipeline's metrics aggregator (SSE); see [`FEEDBACK_LOOP_PLAN.md`](FEEDBACK_LOOP_PLAN.md)
-and `pipeline/` for how to run the loop end to end.
+### 8. Run the feedback loop (continuous learning)
+The engine streams every scored transaction to the `txn:events` Redis Stream; the
+Python services in [`pipeline/`](pipeline/) consume it, learn from confirmed
+outcomes, and close the loop two ways — a **fast loop** that blacklists repeat
+offenders live (`bl:*`, caught by rules R001/R002) and a **slow loop** that
+retrains the model, exports ONNX, and publishes `model:invalidate` so the engine
+hot-reloads it. A live dashboard shows fraud detection rising and false positives
+falling as it runs (§8.4, §10.3).
+
+Install the pipeline deps (into the same `.venv` from step 2):
+```bash
+pip install -r pipeline/requirements.txt
+```
+
+**Laptop demo** — the self-contained "prove the loop improves" run (champion vs
+challenger, driven by the orchestrator; Redis on `:6379` from step 1):
+```bash
+python3 pipeline/generator.py --scale small --out pipeline/data/sim/small   # deterministic labelled sim
+python3 -m uvicorn --app-dir pipeline aggregator:create_app --factory --port 8090 &  # metrics + SSE + dashboard
+python3 pipeline/fast_loop.py &                                             # confirmed fraud -> bl:* (repeats blocked live)
+python3 pipeline/orchestrator.py --sim pipeline/data/sim/small --tps 400 &  # streams decisions + labels
+```
+Open **http://localhost:8090/** (serves `feedback_dashboard_mockup.html` off the
+live SSE feed) and click **Apply feedback** — recall steps up and FPR steps down at
+the marker. Services read Redis via `REDIS_URL` (default `redis://localhost:6379`)
+and write Parquet under `PIPELINE_DATA` (default `pipeline/data`).
+
+**Prove it offline (no Redis):**
+```bash
+python3 pipeline/evaluate.py --sim pipeline/data/sim/small   # per-round champion/challenger learning curve
+python3 -m pytest pipeline/tests                             # incl. the learning-curve assertion (recall↑ / FP↓)
+```
+
+The **engine-in-the-loop** path adds `pipeline/parquet_writer.py` (audit stream →
+Parquet system-of-record) and `pipeline/retrain_loop.py` (Parquet + matured labels
+→ ONNX → `model:invalidate`), plus `pipeline/chargeback_feed.py` as the label
+source. That is the at-scale flow — see [`FEEDBACK_LOOP_PLAN.md`](FEEDBACK_LOOP_PLAN.md)
+and the **Feedback-loop run** section of [`LOAD_TEST_RUNBOOK.md`](LOAD_TEST_RUNBOOK.md).
 
 ---
 
